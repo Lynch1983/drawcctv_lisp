@@ -338,7 +338,7 @@
 ;;;---------------------------------------------------------------
 ;;;  break-lines-in-set
 ;;;  Break all lines in a selection set at their intersections
-;;;  Uses spatial index for O(n*k) instead of O(n²)
+;;;  Uses spatial index for O(n*k) instead of O(n^2)
 ;;;  Args: line-ss - selection set of lines
 ;;;  Returns: selection set of all resulting lines
 ;;;---------------------------------------------------------------
