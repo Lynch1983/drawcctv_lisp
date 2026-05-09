@@ -4,14 +4,13 @@
 ;;;  Optimized: spatial hash, endpoint hash, entmake
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M02 (line_utils.lsp)
+;;;  DEPENDENCIES: M00 (spatial_index.lsp), M02 (line_utils.lsp)
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
 (setq *dup-tolerance* 1.0)
-(setq *dup-cell-size* 5000.0)
 
 ;;;---------------------------------------------------------------
 ;;;  dup-line-get-key
@@ -142,40 +141,6 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  dup-box-from-pts
-;;;  Get bounding box from pre-computed endpoints
-;;;  Args: pts - (pt1 pt2)
-;;;  Returns: (min-x min-y max-x max-y)
-;;;---------------------------------------------------------------
-(defun dup-box-from-pts (pts / x1 y1 x2 y2)
-  (if (and pts (= (length pts) 2))
-    (progn
-      (setq x1 (car (car pts)) y1 (cadr (car pts)))
-      (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
-      (list (min x1 x2) (min y1 y2) (max x1 x2) (max y1 y2))
-    )
-    nil
-  )
-)
-
-;;;---------------------------------------------------------------
-;;;  dup-boxes-overlap-p
-;;;  Check if two bounding boxes overlap
-;;;  Args: box1, box2 - bounding boxes
-;;;  Returns: T or nil
-;;;---------------------------------------------------------------
-(defun dup-boxes-overlap-p (box1 box2 / tol)
-  (setq tol *dup-tolerance*)
-  (if (and box1 box2)
-    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))
-             (< (nth 2 box2) (- (nth 0 box1) tol))
-             (< (nth 3 box1) (- (nth 1 box2) tol))
-             (< (nth 3 box2) (- (nth 1 box1) tol))))
-    nil
-  )
-)
-
-;;;---------------------------------------------------------------
 ;;;  dup-lines-overlap-p
 ;;;  Check if two colinear lines overlap
 ;;;  Args: ent1, ent2 - entity names (assumed colinear)
@@ -184,7 +149,7 @@
 (defun dup-lines-overlap-p (ent1 ent2 / box1 box2)
   (setq box1 (dup-line-bounding-box ent1))
   (setq box2 (dup-line-bounding-box ent2))
-  (dup-boxes-overlap-p box1 box2)
+  (sp-boxes-overlap-p box1 box2 *dup-tolerance*)
 )
 
 ;;;---------------------------------------------------------------
@@ -294,85 +259,6 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  dup-spatial-hash
-;;;  Compute spatial hash cell keys for a line's bounding box
-;;;  Returns list of cell keys the line touches
-;;;  Args: box - (min-x min-y max-x max-y)
-;;;         cell-size - spatial grid cell size
-;;;  Returns: list of string cell keys
-;;;---------------------------------------------------------------
-(defun dup-spatial-hash (box cell-size / min-cx min-cy max-cx max-cy cx cy cells)
-  (setq min-cx (fix (/ (nth 0 box) cell-size)))
-  (setq min-cy (fix (/ (nth 1 box) cell-size)))
-  (setq max-cx (fix (/ (nth 2 box) cell-size)))
-  (setq max-cy (fix (/ (nth 3 box) cell-size)))
-  (setq cells nil)
-  (setq cx min-cx)
-  (while (<= cx max-cx)
-    (setq cy min-cy)
-    (while (<= cy max-cy)
-      (setq cells (cons (strcat (itoa cx) "_" (itoa cy)) cells))
-      (setq cy (1+ cy))
-    )
-    (setq cx (1+ cx))
-  )
-  cells
-)
-
-;;;---------------------------------------------------------------
-;;;  dup-build-spatial-index
-;;;  Build a spatial hash index from a list of (ent pts box key) records
-;;;  Args: records - list of (ent pts box key)
-;;;         cell-size - spatial grid cell size
-;;;  Returns: assoc list of (cell-key . (record-index ...))
-;;;---------------------------------------------------------------
-(defun dup-build-spatial-index (records cell-size / idx rec box cells cell-key i)
-  (setq idx nil)
-  (setq i 0)
-  (foreach rec records
-    (setq box (caddr rec))
-    (if box
-      (progn
-        (setq cells (dup-spatial-hash box cell-size))
-        (foreach ck cells
-          (setq cell-key (assoc ck idx))
-          (if cell-key
-            (setq idx (subst (cons ck (cons i (cdr cell-key))) cell-key idx))
-            (setq idx (cons (list ck i) idx))
-          )
-        )
-      )
-    )
-    (setq i (1+ i))
-  )
-  idx
-)
-
-;;;---------------------------------------------------------------
-;;;  dup-get-candidates
-;;;  Get candidate record indices from spatial index for a given box
-;;;  Args: box - bounding box
-;;;         idx - spatial index
-;;;         cell-size - grid cell size
-;;;  Returns: sorted list of unique candidate indices
-;;;---------------------------------------------------------------
-(defun dup-get-candidates (box idx cell-size / cells candidates cell-records)
-  (setq cells (dup-spatial-hash box cell-size))
-  (setq candidates nil)
-  (foreach ck cells
-    (setq cell-records (assoc ck idx))
-    (if cell-records
-      (foreach ri (cdr cell-records)
-        (if (not (member ri candidates))
-          (setq candidates (cons ri candidates))
-        )
-      )
-    )
-  )
-  (vl-sort-i candidates '<)
-)
-
-;;;---------------------------------------------------------------
 ;;;  dup-build-line-records
 ;;;  Pre-compute endpoints, bounding boxes, and keys for all lines
 ;;;  Avoids repeated entget calls during comparison
@@ -389,7 +275,7 @@
         (if ent
           (progn
             (setq pts (line-get-endpoints ent))
-            (setq box (dup-box-from-pts pts))
+            (setq box (sp-box-from-pts pts))
             (setq key (dup-line-get-key-from-pts pts))
             (setq hash (if pts (dup-endpoint-hash pts) nil))
             (setq records (cons (list ent pts box key hash) records))
@@ -485,16 +371,17 @@
         (setq group-records (cdr grp))
         (if (> (length group-records) 1)
           (progn
-            (setq idx (dup-build-spatial-index
+            (setq idx (sp-build-index
                         (mapcar '(lambda (ri) (nth ri records)) group-records)
-                        *dup-cell-size*))
+                        '(lambda (r) (caddr r))
+                        (sp-get-cell-size)))
             (setq j 0)
             (while (< j (length group-records))
               (setq r1 (nth (nth j group-records) records))
               (setq ent1 (car r1))
               (if (and ent1 (entget ent1) (not (member ent1 merged)))
                 (progn
-                  (setq candidates (dup-get-candidates (caddr r1) idx *dup-cell-size*))
+                  (setq candidates (sp-get-candidates (caddr r1) idx (sp-get-cell-size)))
                   (foreach ci candidates
                     (if (/= ci j)
                       (progn
@@ -502,7 +389,7 @@
                         (setq ent2 (car r2))
                         (if (and ent2 (entget ent2) (not (member ent2 merged)))
                           (if (and (dup-keys-colinear-p (nth 3 r1) (nth 3 r2))
-                                   (dup-boxes-overlap-p (caddr r1) (caddr r2)))
+                                   (sp-boxes-overlap-p (caddr r1) (caddr r2) *dup-tolerance*))
                             (progn
                               (setq new-ent (dup-merge-two-lines ent1 ent2))
                               (if new-ent
@@ -594,22 +481,6 @@
 ;;;---------------------------------------------------------------
 (defun dup-get-tolerance ()
   *dup-tolerance*
-)
-
-;;;---------------------------------------------------------------
-;;;  dup-set-cell-size
-;;;  Set the spatial hash cell size
-;;;---------------------------------------------------------------
-(defun dup-set-cell-size (val)
-  (setq *dup-cell-size* val)
-)
-
-;;;---------------------------------------------------------------
-;;;  dup-get-cell-size
-;;;  Get the current spatial hash cell size
-;;;---------------------------------------------------------------
-(defun dup-get-cell-size ()
-  *dup-cell-size*
 )
 
 ;;;===============================================================
@@ -773,13 +644,13 @@
   )
 
   (princ "\n[Test 11] spatial hash cell size get/set...")
-  (setq old-cs (dup-get-cell-size))
-  (dup-set-cell-size 10000.0)
-  (if (= (dup-get-cell-size) 10000.0)
+  (setq old-cs (sp-get-cell-size))
+  (sp-set-cell-size 10000.0)
+  (if (= (sp-get-cell-size) 10000.0)
     (progn
       (princ " PASS")
       (setq passed (1+ passed))
-      (dup-set-cell-size old-cs)
+      (sp-set-cell-size old-cs)
     )
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
@@ -801,6 +672,7 @@
 (princ (strcat "  Functions: dup-remove-identical, dup-merge-colinear, "
                "dup-remove-all, dup-lines-identical-p"))
 (princ (strcat "\n  Default tolerance: " (rtos *dup-tolerance* 2 2)))
-(princ (strcat "\n  Spatial cell size: " (rtos *dup-cell-size* 2 0)))
+(princ (strcat "\n  Spatial cell size: " (rtos *sp-default-cell-size* 2 0)))
+(princ "\n  Dependencies: M00 (spatial_index.lsp), M02 (line_utils.lsp)")
 (princ "\n  Test: (test-M04-duplicate-remover)")
 (princ)

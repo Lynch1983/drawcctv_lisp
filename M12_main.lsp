@@ -4,7 +4,8 @@
 ;;;  Refactored to match original drawCCTV logic
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01-M11
+;;;  DEPENDENCIES: M00-M11
+;;;  LOAD ORDER: M00, M01, M02, M03, M04, M05, M06, M07, M08, M09, M10, M11, M12
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------

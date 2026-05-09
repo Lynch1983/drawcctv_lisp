@@ -5,51 +5,25 @@
 ;;;  NOTE: Only handles LINE entities, not ARC/CIRCLE/SPLINE
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M02 (line_utils.lsp)
+;;;  DEPENDENCIES: M00 (spatial_index.lsp), M02 (line_utils.lsp)
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
 (setq *break-tolerance* 0.001)
-(setq *break-cell-size* 5000.0)
-
-;;;---------------------------------------------------------------
-;;;  break-spatial-hash
-;;;  Compute spatial hash cell keys for a bounding box
-;;;  Args: box - (min-x min-y max-x max-y)
-;;;         cell-size - grid cell size
-;;;  Returns: list of string cell keys
-;;;---------------------------------------------------------------
-(defun break-spatial-hash (box cell-size / min-cx min-cy max-cx max-cy cx cy cells)
-  (setq min-cx (fix (/ (nth 0 box) cell-size)))
-  (setq min-cy (fix (/ (nth 1 box) cell-size)))
-  (setq max-cx (fix (/ (nth 2 box) cell-size)))
-  (setq max-cy (fix (/ (nth 3 box) cell-size)))
-  (setq cells nil)
-  (setq cx min-cx)
-  (while (<= cx max-cx)
-    (setq cy min-cy)
-    (while (<= cy max-cy)
-      (setq cells (cons (strcat (itoa cx) "_" (itoa cy)) cells))
-      (setq cy (1+ cy))
-    )
-    (setq cx (1+ cx))
-  )
-  cells
-)
 
 ;;;---------------------------------------------------------------
 ;;;  break-build-spatial-index
 ;;;  Build spatial hash index from line entities
+;;;  Uses sp-build-index from M00 for index construction
 ;;;  Args: line-ss - selection set of LINE entities
 ;;;         cell-size - grid cell size
 ;;;  Returns: (index line-data) where
 ;;;    index = assoc list of (cell-key . (line-idx ...))
 ;;;    line-data = list of (ent pts box)
 ;;;---------------------------------------------------------------
-(defun break-build-spatial-index (line-ss cell-size / idx line-data i ent pts box cells cell-key)
-  (setq idx nil)
+(defun break-build-spatial-index (line-ss cell-size / line-data i ent pts box idx)
   (setq line-data nil)
   (setq i 0)
   (if line-ss
@@ -60,118 +34,18 @@
           (progn
             (setq pts (line-get-endpoints ent))
             (if pts
-              (progn
-                (setq box (list (min (car (car pts)) (car (cadr pts)))
-                                (min (cadr (car pts)) (cadr (cadr pts)))
-                                (max (car (car pts)) (car (cadr pts)))
-                                (max (cadr (car pts)) (cadr (cadr pts)))))
-                (setq line-data (cons (list ent pts box) line-data))
-                (setq cells (break-spatial-hash box cell-size))
-                (foreach ck cells
-                  (setq cell-key (assoc ck idx))
-                  (if cell-key
-                    (setq idx (subst (cons ck (cons i (cdr cell-key))) cell-key idx))
-                    (setq idx (cons (list ck i) idx))
-                  )
-                )
-              )
+              (setq line-data (cons (list ent pts (sp-box-from-pts pts)) line-data))
             )
           )
         )
         (setq i (1+ i))
       )
-      (list idx (reverse line-data))
+      (setq line-data (reverse line-data))
+      (setq idx (sp-build-index line-data '(lambda (r) (caddr r)) cell-size))
+      (list idx line-data)
     )
     (list nil nil)
   )
-)
-
-;;;---------------------------------------------------------------
-;;;  break-get-nearby-indices
-;;;  Get indices of lines near a given bounding box
-;;;  Args: box - bounding box
-;;;         idx - spatial index
-;;;         cell-size - grid cell size
-;;;  Returns: list of unique indices
-;;;---------------------------------------------------------------
-(defun break-get-nearby-indices (box idx cell-size / cells candidates cell-records)
-  (setq cells (break-spatial-hash box cell-size))
-  (setq candidates nil)
-  (foreach ck cells
-    (setq cell-records (assoc ck idx))
-    (if cell-records
-      (foreach ri (cdr cell-records)
-        (if (not (member ri candidates))
-          (setq candidates (cons ri candidates))
-        )
-      )
-    )
-  )
-  candidates
-)
-
-;;;---------------------------------------------------------------
-;;;  break-boxes-overlap-p
-;;;  Quick bounding box overlap test
-;;;  Args: box1, box2 - (min-x min-y max-x max-y)
-;;;  Returns: T or nil
-;;;---------------------------------------------------------------
-(defun break-boxes-overlap-p (box1 box2)
-  (not (or (< (nth 2 box1) (nth 0 box2))
-           (< (nth 2 box2) (nth 0 box1))
-           (< (nth 3 box1) (nth 1 box2))
-           (< (nth 3 box2) (nth 1 box1))))
-)
-
-;;;---------------------------------------------------------------
-;;;  break-remove-duplicate-points
-;;;  Remove duplicate points from a list
-;;;  Args: pt-list - list of points
-;;;         tol     - distance tolerance
-;;;  Returns: list with duplicates removed
-;;;---------------------------------------------------------------
-(defun break-remove-duplicate-points (pt-list tol / result)
-  (setq result nil)
-  (foreach pt pt-list
-    (if (not (break-point-in-list-p pt result tol))
-      (setq result (cons pt result))
-    )
-  )
-  (reverse result)
-)
-
-;;;---------------------------------------------------------------
-;;;  break-point-in-list-p
-;;;  Check if a point is already in a list (within tolerance)
-;;;  Args: pt      - point to check
-;;;         pt-list - list of points
-;;;         tol     - distance tolerance
-;;;  Returns: T or nil
-;;;---------------------------------------------------------------
-(defun break-point-in-list-p (pt pt-list tol / found)
-  (setq found nil)
-  (foreach p pt-list
-    (if (< (distance pt p) tol)
-      (setq found T)
-    )
-  )
-  found
-)
-
-;;;---------------------------------------------------------------
-;;;  break-sort-points-by-distance
-;;;  Sort intersection points by distance from line start
-;;;  Args: start-pt - line start point
-;;;         pt-list  - list of points to sort
-;;;  Returns: sorted list of points
-;;;---------------------------------------------------------------
-(defun break-sort-points-by-distance (start-pt pt-list / dist-list)
-  (setq dist-list nil)
-  (foreach pt pt-list
-    (setq dist-list (cons (cons (distance start-pt pt) pt) dist-list))
-  )
-  (setq dist-list (vl-sort dist-list '(lambda (a b) (< (car a) (car b)))))
-  (mapcar 'cdr dist-list)
 )
 
 ;;;---------------------------------------------------------------
@@ -236,7 +110,7 @@
       (setq start-pt (car pts))
       (setq end-pt (cadr pts))
       (setq layer (line-get-layer ent))
-      (setq sorted-pts (break-sort-points-by-distance start-pt pt-list))
+      (setq sorted-pts (sp-sort-points-by-distance start-pt pt-list))
       (setq sorted-pts
         (vl-remove-if
           '(lambda (p)
@@ -266,14 +140,14 @@
   (setq rec (nth line-idx line-data))
   (setq ent1 (car rec))
   (setq box (caddr rec))
-  (setq nearby-indices (break-get-nearby-indices box idx cell-size))
+  (setq nearby-indices (sp-get-candidates box idx cell-size))
   (setq pts nil)
   (foreach ni nearby-indices
     (if (/= ni line-idx)
       (progn
         (setq rec2 (nth ni line-data))
         (setq ent2 (car rec2))
-        (if (and ent2 (break-boxes-overlap-p box (caddr rec2)))
+        (if (and ent2 (sp-boxes-overlap-p box (caddr rec2) nil))
           (progn
             (setq int-pts (lines-get-intersection ent1 ent2))
             (if int-pts
@@ -286,7 +160,7 @@
       )
     )
   )
-  (break-remove-duplicate-points pts *break-tolerance*)
+  (sp-remove-duplicate-points pts *break-tolerance*)
 )
 
 ;;;---------------------------------------------------------------
@@ -317,7 +191,7 @@
       )
     )
   )
-  (break-remove-duplicate-points pts *break-tolerance*)
+  (sp-remove-duplicate-points pts *break-tolerance*)
 )
 
 ;;;---------------------------------------------------------------
@@ -352,12 +226,12 @@
 
       (if (> n 50)
         (progn
-          (setq spatial-result (break-build-spatial-index line-ss *break-cell-size*))
+          (setq spatial-result (break-build-spatial-index line-ss (sp-get-cell-size)))
           (setq idx (car spatial-result))
           (setq line-data (cadr spatial-result))
           (setq i 0)
           (repeat n
-            (setq int-pts (break-collect-intersections-indexed i line-data idx *break-cell-size*))
+            (setq int-pts (break-collect-intersections-indexed i line-data idx (sp-get-cell-size)))
             (setq ent (car (nth i line-data)))
             (if (and ent (entget ent))
               (progn
@@ -451,22 +325,6 @@
   *break-tolerance*
 )
 
-;;;---------------------------------------------------------------
-;;;  break-set-cell-size
-;;;  Set the spatial hash cell size
-;;;---------------------------------------------------------------
-(defun break-set-cell-size (val)
-  (setq *break-cell-size* val)
-)
-
-;;;---------------------------------------------------------------
-;;;  break-get-cell-size
-;;;  Get the current spatial hash cell size
-;;;---------------------------------------------------------------
-(defun break-get-cell-size ()
-  *break-cell-size*
-)
-
 ;;;===============================================================
 ;;;  TEST FUNCTIONS
 ;;;===============================================================
@@ -504,7 +362,7 @@
   (setq pt-list (list (list 800.0 0.0 0.0)
                       (list 200.0 0.0 0.0)
                       (list 500.0 0.0 0.0)))
-  (setq sorted (break-sort-points-by-distance start pt-list))
+  (setq sorted (sp-sort-points-by-distance start pt-list))
   (if (and sorted
            (= (length sorted) 3)
            (< (abs (- (car (car sorted)) 200.0)) 0.001)
@@ -519,7 +377,7 @@
                       (list 100.001 100.0 0.0)
                       (list 200.0 200.0 0.0)
                       (list 100.0 100.0 0.0)))
-  (setq unique (break-remove-duplicate-points pt-list 0.01))
+  (setq unique (sp-remove-duplicate-points pt-list 0.01))
   (if (= (length unique) 2)
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
@@ -646,22 +504,22 @@
   )
 
   (princ "\n[Test 10] spatial hash cell size get/set...")
-  (setq old-cs (break-get-cell-size))
-  (break-set-cell-size 10000.0)
-  (if (= (break-get-cell-size) 10000.0)
+  (setq old-cs (sp-get-cell-size))
+  (sp-set-cell-size 10000.0)
+  (if (= (sp-get-cell-size) 10000.0)
     (progn
       (princ " PASS")
       (setq passed (1+ passed))
-      (break-set-cell-size old-cs)
+      (sp-set-cell-size old-cs)
     )
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
   (princ "\n[Test 11] break-boxes-overlap-p...")
-  (if (and (break-boxes-overlap-p (list 0.0 0.0 1000.0 1000.0)
-                                    (list 500.0 500.0 1500.0 1500.0))
-           (null (break-boxes-overlap-p (list 0.0 0.0 100.0 100.0)
-                                         (list 200.0 200.0 300.0 300.0))))
+  (if (and (sp-boxes-overlap-p (list 0.0 0.0 1000.0 1000.0)
+                                (list 500.0 500.0 1500.0 1500.0) nil)
+           (null (sp-boxes-overlap-p (list 0.0 0.0 100.0 100.0)
+                                     (list 200.0 200.0 300.0 300.0) nil)))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
@@ -683,6 +541,7 @@
 (princ (strcat "  Functions: break-lines-in-set, break-lines-all, "
                "break-line-at-intersections, break-line-at-points"))
 (princ (strcat "\n  Default tolerance: " (rtos *break-tolerance* 2 4)))
-(princ (strcat "\n  Spatial cell size: " (rtos *break-cell-size* 2 0)))
+(princ (strcat "\n  Spatial cell size: " (rtos *sp-default-cell-size* 2 0)))
+(princ "\n  Dependencies: M00 (spatial_index.lsp), M02 (line_utils.lsp)")
 (princ "\n  Test: (test-M05-break-lines)")
 (princ)

@@ -3,7 +3,7 @@
 ;;;  Comprehensive test suite for all modules
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01-M12
+;;;  DEPENDENCIES: M00-M12
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
@@ -67,6 +67,7 @@
   (princ (strcat "\n\n=== Testing " module-name " ==="))
   (setq result
     (cond
+      ((= module-name "M00") (test-M00-spatial-index))
       ((= module-name "M01") (test-M01-graph-algorithm))
       ((= module-name "M02") (test-M02-line-utils))
       ((= module-name "M03") (test-M03-mline-converter))
@@ -102,6 +103,7 @@
   (princ "\n========================================")
   
   ;; Run all module tests
+  (test-module "M00")
   (test-module "M01")
   (test-module "M02")
   (test-module "M03")
