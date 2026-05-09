@@ -15,7 +15,8 @@
 (defun gui-select-blocks (prompt / ss names i name)
   (princ (strcat "\n" prompt))
   (setq ss (ssget '((0 . "INSERT"))))
-  (if ss
+  (if (null ss)
+    nil
     (progn
       (setq names nil)
       (setq i 0)
@@ -28,7 +29,6 @@
       )
       names
     )
-    nil
   )
 )
 
@@ -78,100 +78,107 @@
 ;;;  Matches original OpenDCL form fields
 ;;;---------------------------------------------------------------
 (defun gui-configure-workflow (/ cam-blocks jnx-blocks tray-layer pipe-layer
-                                     name-layers coef jnx-bias room-bias)
-  (princ "\n\n========================================")
-  (princ "\n  CCTV System Configuration")
-  (princ "\n========================================")
+                                     name-layers coef jnx-bias room-bias result)
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (progn
+          (princ "\n\n========================================")
+          (princ "\n  CCTV System Configuration")
+          (princ "\n========================================")
 
-  ;; Step 1: Camera blocks
-  (princ "\n\n[1/8] Camera block selection")
-  (princ "\n  Select camera block(s) in drawing:")
-  (setq cam-blocks (gui-select-blocks "Select camera blocks: "))
-  (if cam-blocks
-    (progn
-      (main-set-camera-blocks cam-blocks)
-      (princ (strcat "\n  Selected " (itoa (length cam-blocks)) " block type(s)."))
+          (princ "\n\n[1/8] Camera block selection")
+          (princ "\n  Select camera block(s) in drawing:")
+          (setq cam-blocks (gui-select-blocks "Select camera blocks: "))
+          (if cam-blocks
+            (progn
+              (main-set-camera-blocks cam-blocks)
+              (princ (strcat "\n  Selected " (itoa (length cam-blocks)) " block type(s)."))
+            )
+            (princ "\n  Warning: No camera blocks selected.")
+          )
+
+          (princ "\n\n[2/8] Camera name text layers")
+          (princ "\n  Layers containing camera name text labels.")
+          (setq name-layers (gui-select-layers-multi "Camera name text layers: "))
+          (if name-layers
+            (progn
+              (main-set-camera-name-layers name-layers)
+              (princ (strcat "\n  Set " (itoa (length name-layers)) " name layer(s)."))
+            )
+            (princ "\n  No name layers set.")
+          )
+
+          (princ "\n\n[3/8] Junction box block selection")
+          (princ "\n  Select junction box block(s) in drawing:")
+          (setq jnx-blocks (gui-select-blocks "Select junction box blocks: "))
+          (if jnx-blocks
+            (progn
+              (main-set-junction-blocks jnx-blocks)
+              (princ (strcat "\n  Selected " (itoa (length jnx-blocks)) " block type(s)."))
+            )
+            (princ "\n  Warning: No junction blocks selected.")
+          )
+
+          (princ "\n\n[4/8] Cable tray layer (MLINE)")
+          (setq tray-layer (gui-select-layer "Cable tray MLINE layer name: "))
+          (if tray-layer
+            (progn
+              (main-set-cable-tray-layer tray-layer)
+              (main-bltc-add tray-layer)
+              (princ (strcat "\n  Cable tray layer: " tray-layer))
+            )
+            (princ "\n  No cable tray layer set.")
+          )
+
+          (princ "\n\n[5/8] Pipe layer (optional)")
+          (setq pipe-layer (gui-select-layer "Pipe layer name (Enter to skip): "))
+          (if pipe-layer
+            (progn
+              (main-set-pipe-layer pipe-layer)
+              (princ (strcat "\n  Pipe layer: " pipe-layer))
+            )
+            (princ "\n  No pipe layer set.")
+          )
+
+          (princ "\n\n[6/8] Cable length coefficient")
+          (setq coef (getreal "\n  Enter coefficient (default 1.2): "))
+          (if coef
+            (main-set-cable-coefficient coef)
+            (main-set-cable-coefficient 1.2)
+          )
+          (princ (strcat "\n  Coefficient: " (rtos *main-cable-coefficient* 2 2)))
+
+          (princ "\n\n[7/8] Distance biases")
+          (setq jnx-bias (getreal "\n  Junction bias (default 10000): "))
+          (setq room-bias (getreal "\n  Room entry bias (default 25000): "))
+          (main-set-biases
+            (if jnx-bias jnx-bias 10000.0)
+            (if room-bias room-bias 25000.0))
+          (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
+          (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
+
+          (princ "\n\n[8/8] Room entry points (optional)")
+          (if (= (getstring "\n  Add room entry points? (y/n): ") "y")
+            (c:CCTV-RoomPts)
+            (princ "\n  No room points set.")
+          )
+
+          (princ "\n\n========================================")
+          (princ "\n  Configuration complete!")
+          (princ "\n========================================")
+          T
+        )
+      )
     )
-    (princ "\n  Warning: No camera blocks selected.")
   )
-
-  ;; Step 2: Camera name text layers
-  (princ "\n\n[2/8] Camera name text layers")
-  (princ "\n  Layers containing camera name text labels.")
-  (setq name-layers (gui-select-layers-multi "Camera name text layers: "))
-  (if name-layers
+  (if (vl-catch-all-error-p result)
     (progn
-      (main-set-camera-name-layers name-layers)
-      (princ (strcat "\n  Set " (itoa (length name-layers)) " name layer(s)."))
+      (princ (strcat "\nConfiguration error: " (vl-catch-all-error-message result)))
+      nil
     )
-    (princ "\n  No name layers set.")
+    result
   )
-
-  ;; Step 3: Junction box blocks
-  (princ "\n\n[3/8] Junction box block selection")
-  (princ "\n  Select junction box block(s) in drawing:")
-  (setq jnx-blocks (gui-select-blocks "Select junction box blocks: "))
-  (if jnx-blocks
-    (progn
-      (main-set-junction-blocks jnx-blocks)
-      (princ (strcat "\n  Selected " (itoa (length jnx-blocks)) " block type(s)."))
-    )
-    (princ "\n  Warning: No junction blocks selected.")
-  )
-
-  ;; Step 4: Cable tray (MLINE) layer
-  (princ "\n\n[4/8] Cable tray layer (MLINE)")
-  (setq tray-layer (gui-select-layer "Cable tray MLINE layer name: "))
-  (if tray-layer
-    (progn
-      (main-set-cable-tray-layer tray-layer)
-      (main-bltc-add tray-layer)
-      (princ (strcat "\n  Cable tray layer: " tray-layer))
-    )
-    (princ "\n  No cable tray layer set.")
-  )
-
-  ;; Step 5: Pipe layer (optional)
-  (princ "\n\n[5/8] Pipe layer (optional)")
-  (setq pipe-layer (gui-select-layer "Pipe layer name (Enter to skip): "))
-  (if pipe-layer
-    (progn
-      (main-set-pipe-layer pipe-layer)
-      (princ (strcat "\n  Pipe layer: " pipe-layer))
-    )
-    (princ "\n  No pipe layer set.")
-  )
-
-  ;; Step 6: Cable coefficient
-  (princ "\n\n[6/8] Cable length coefficient")
-  (setq coef (getreal "\n  Enter coefficient (default 1.2): "))
-  (if coef
-    (main-set-cable-coefficient coef)
-    (main-set-cable-coefficient 1.2)
-  )
-  (princ (strcat "\n  Coefficient: " (rtos *main-cable-coefficient* 2 2)))
-
-  ;; Step 7: Distance biases
-  (princ "\n\n[7/8] Distance biases")
-  (setq jnx-bias (getreal "\n  Junction bias (default 10000): "))
-  (setq room-bias (getreal "\n  Room entry bias (default 25000): "))
-  (main-set-biases
-    (if jnx-bias jnx-bias 10000.0)
-    (if room-bias room-bias 25000.0))
-  (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
-  (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
-
-  ;; Step 8: Room entry points (optional)
-  (princ "\n\n[8/8] Room entry points (optional)")
-  (if (= (getstring "\n  Add room entry points? (y/n): ") "y")
-    (c:CCTV-RoomPts)
-    (princ "\n  No room points set.")
-  )
-
-  (princ "\n\n========================================")
-  (princ "\n  Configuration complete!")
-  (princ "\n========================================")
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -195,7 +202,9 @@
       (gui-configure-workflow)
     )
   )
-  (main-run-workflow)
+  (if *main-camera-blocks*
+    (main-run-workflow)
+  )
   (princ)
 )
 
@@ -236,20 +245,21 @@
 ;;;  Set room entry points interactively
 ;;;  Equivalent to original room point selection
 ;;;---------------------------------------------------------------
-(defun c:CCTV-RoomPts (/ pt pts cont)
+(defun c:CCTV-RoomPts (/ pt pts cont result)
   (setq pts nil)
   (setq cont T)
   (princ "\n=== Room Entry Points ===")
   (princ "\n  Pick room entry points. Press ESC or Enter to finish.")
   (while cont
-    (setq pt (getpoint "\n  Pick room entry point (Enter to finish): "))
-    (if pt
+    (setq result (vl-catch-all-apply 'getpoint '("\n  Pick room entry point (Enter to finish): ")))
+    (if (or (vl-catch-all-error-p result) (null result))
+      (setq cont nil)
       (progn
+        (setq pt result)
         (setq pts (cons pt pts))
         (princ (strcat "  Added point: (" (rtos (car pt) 2 0) ","
                        (rtos (cadr pt) 2 0) ")"))
       )
-      (setq cont nil)
     )
   )
   (if pts
@@ -293,7 +303,7 @@
         (progn
           (equiv-add-pair pt1 pt2)
           (princ "\n  Equivalent point pair added.")
-          (princ (strcat "\n  Total pairs: " (itoa (length *equiv-points*)))))
+          (princ (strcat "\n  Total pairs: " (itoa (equiv-count)))))
         (princ "\n  Cancelled.")
       )
     )
@@ -357,6 +367,9 @@
   (princ "\n\n========================================")
   (princ "\n  Current CCTV Configuration")
   (princ "\n========================================")
+  (if (null *main-camera-blocks*)
+    (princ "\n  WARNING: No camera blocks configured. Run CCTV-Config first.")
+  )
   (princ (strcat "\n  Camera blocks: "
                  (if *main-camera-blocks*
                    (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-camera-blocks*))
@@ -377,7 +390,7 @@
   (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
   (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
   (princ (strcat "\n  Room points: " (itoa (length *main-room-points*))))
-  (princ (strcat "\n  Equiv point pairs: " (itoa (length *equiv-points*))))
+  (princ (strcat "\n  Equiv point pairs: " (itoa (equiv-count))))
   (princ (strcat "\n  MLINE area: "
                  (if *main-mline-set*
                    (strcat (itoa (sslength *main-mline-set*)) " MLINE(s)")

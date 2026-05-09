@@ -10,21 +10,21 @@
 ;;;---------------------------------------------------------------
 ;;;  Global Configuration Variables
 ;;;---------------------------------------------------------------
-(setq *main-camera-blocks* nil)         ; List of camera block names
-(setq *main-camera-name-layers* nil)    ; List of camera name text layers
-(setq *main-junction-blocks* nil)       ; List of junction box block names
-(setq *main-cable-tray-layer* nil)      ; Cable tray layer name
-(setq *main-pipe-layer* nil)            ; Pipe layer name (optional)
-(setq *main-room-points* nil)           ; List of room entry points
-(setq *main-equiv-points* nil)          ; List of equivalent point pairs
-(setq *main-cable-coefficient* 1.2)     ; Cable length coefficient
-(setq *main-junction-bias* 10000.0)     ; Junction box distance bias
-(setq *main-room-bias* 25000.0)         ; Room entry distance bias
-(setq *main-temp-layer* "TEMP_CCTV")    ; Temporary layer name (was test1)
-(setq *main-temp-layer2* "TEMP_CCTV2")  ; Second temp layer (was test2)
-(setq *main-mline-set* nil)             ; MLINE selection set (user area pick)
-(setq *main-mline-p1* nil)              ; MLINE area corner 1
-(setq *main-mline-p2* nil)              ; MLINE area corner 2
+(setq *main-camera-blocks* nil)
+(setq *main-camera-name-layers* nil)
+(setq *main-junction-blocks* nil)
+(setq *main-cable-tray-layer* nil)
+(setq *main-pipe-layer* nil)
+(setq *main-room-points* nil)
+(setq *main-equiv-points* nil)
+(setq *main-cable-coefficient* 1.2)
+(setq *main-junction-bias* 10000.0)
+(setq *main-room-bias* 25000.0)
+(setq *main-temp-layer* "TEMP_CCTV")
+(setq *main-temp-layer2* "TEMP_CCTV2")
+(setq *main-mline-set* nil)
+(setq *main-mline-p1* nil)
+(setq *main-mline-p2* nil)
 
 ;;; bltc - protected layer list (layers to keep visible)
 (setq *main-bltc* nil)
@@ -99,7 +99,6 @@
 ;;;---------------------------------------------------------------
 (defun main-gbtc (/ layers tcmb layerName)
   (vl-load-com)
-  ;; Record currently hidden layers
   (setq *main-hidden-layers* nil)
   (setq layers (vla-get-layers (vla-get-activedocument (vlax-get-acad-object))))
   (vlax-for layer layers
@@ -107,12 +106,10 @@
       (setq *main-hidden-layers* (cons (vla-get-name layer) *main-hidden-layers*))
     )
   )
-  ;; Build list of all layers
   (setq tcmb nil)
   (vlax-for layer layers
     (setq tcmb (cons (list (vla-get-name layer) layer) tcmb))
   )
-  ;; Turn off layers NOT in bltc
   (if *main-bltc*
     (progn
       (foreach ent *main-bltc*
@@ -163,6 +160,74 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  main-setup-temp-layer
+;;;  Create a temporary layer with error handling
+;;;  Returns T on success, nil on failure
+;;;---------------------------------------------------------------
+(defun main-setup-temp-layer (layer-name color / err-result)
+  (if (null layer-name)
+    (progn
+      (princ "\n[main] Setup temp layer: layer name is nil.")
+      nil
+    )
+    (progn
+      (setq err-result (vl-catch-all-apply
+        '(lambda ()
+          (if (null (tblsearch "LAYER" layer-name))
+            (command-s "_.layer" "_m" layer-name "_c" color layer-name "")
+          )
+          T
+        )))
+      (if (vl-catch-all-error-p err-result)
+        (progn
+          (princ (strcat "\n[main] Layer setup error for " layer-name ": "
+                         (vl-catch-all-error-message err-result)))
+          nil
+        )
+        err-result
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-cleanup-temp-layer
+;;;  Erase all entities on a temporary layer with error handling
+;;;  Returns T on success, nil on failure
+;;;---------------------------------------------------------------
+(defun main-cleanup-temp-layer (layer-name / clean-ss i tmp err-result)
+  (if (null layer-name)
+    (progn
+      (princ "\n[main] Cleanup temp layer: layer name is nil.")
+      nil
+    )
+    (progn
+      (setq err-result (vl-catch-all-apply
+        '(lambda ()
+          (setq i 0)
+          (setq clean-ss (ssget "x" (list (cons 8 layer-name))))
+          (if clean-ss
+            (repeat (sslength clean-ss)
+              (setq tmp (ssname clean-ss i))
+              (command-s "_.erase" tmp "")
+              (setq i (1+ i))
+            )
+          )
+          T
+        )))
+      (if (vl-catch-all-error-p err-result)
+        (progn
+          (princ (strcat "\n[main] Layer cleanup error for " layer-name ": "
+                         (vl-catch-all-error-message err-result)))
+          nil
+        )
+        err-result
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
 ;;;  main-init
 ;;;  Initialize global variables and create temp layers
 ;;;---------------------------------------------------------------
@@ -170,14 +235,9 @@
   (graph-init)
   (equiv-clear)
   (setq *main-bltc* nil)
-  ;; Create temp layers
-  (if (null (tblsearch "LAYER" *main-temp-layer*))
-    (command-s "_.layer" "_m" *main-temp-layer* "_c" "3" *main-temp-layer* "")
-  )
+  (main-setup-temp-layer *main-temp-layer* "3")
   (main-bltc-add *main-temp-layer*)
-  (if (null (tblsearch "LAYER" *main-temp-layer2*))
-    (command-s "_.layer" "_m" *main-temp-layer2* "_c" "3" *main-temp-layer2* "")
-  )
+  (main-setup-temp-layer *main-temp-layer2* "3")
   (main-bltc-add *main-temp-layer2*)
   T
 )
@@ -187,16 +247,9 @@
 ;;;  Cleanup temporary entities
 ;;;  Equivalent to original clean_creen
 ;;;---------------------------------------------------------------
-(defun main-cleanup (/ clean-ss i tmp)
-  (setq i 0)
-  (setq clean-ss (ssget "x" (list (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*)))))
-  (if clean-ss
-    (repeat (sslength clean-ss)
-      (setq tmp (ssname clean-ss i))
-      (command-s "_.erase" tmp "")
-      (setq i (1+ i))
-    )
-  )
+(defun main-cleanup (/ )
+  (main-cleanup-temp-layer *main-temp-layer*)
+  (main-cleanup-temp-layer *main-temp-layer2*)
   T
 )
 
@@ -297,25 +350,28 @@
   (princ "\n[main] Processing cable trays...")
   (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
 
-  ;; Convert MLINEs to LINEs
   (if *main-mline-set*
     (progn
-      ;; Use area-selected MLINEs
       (setq lines (mline-convert-selection *main-mline-set* *main-temp-layer*))
-      (princ (strcat "\n[main] Converted " (itoa (sslength *main-mline-set*)) " MLINEs (area)."))
+      (if lines
+        (princ (strcat "\n[main] Converted " (itoa (sslength *main-mline-set*)) " MLINEs (area)."))
+        (princ "\n[main] Warning: MLINE conversion returned nil.")
+      )
     )
     (progn
-      ;; Use entire layer
       (if *main-cable-tray-layer*
-        (setq lines (mline-process-all (list *main-cable-tray-layer*) *main-temp-layer* nil nil))
+        (progn
+          (setq lines (mline-process-all (list *main-cable-tray-layer*) *main-temp-layer* nil nil))
+          (if (null lines)
+            (princ "\n[main] Warning: mline-process-all returned nil.")
+          )
+        )
       )
     )
   )
 
-  ;; Remove duplicates
   (dup-remove-all nil *main-temp-layer*)
 
-  ;; Break at intersections
   (break-lines-all (list *main-temp-layer* *main-temp-layer2*))
 
   (princ "\n[main] Cable trays processed.")
@@ -326,21 +382,222 @@
 ;;;  main-build-graph
 ;;;  Build graph from processed lines
 ;;;---------------------------------------------------------------
-(defun main-build-graph (/ ss gllst)
+(defun main-build-graph (/ ss gllst build-result)
   (princ "\n[main] Building graph...")
   (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
   (setq ss (ssget "x" gllst))
   (if (and ss (> (sslength ss) 0))
     (progn
-      (graph-build-from-lines ss nil)
-      (graph-floyd-compute)
-      (princ (strcat "\n[main] Graph: " (itoa (graph-get-node-count)) " nodes, "
-                     (itoa (graph-get-edge-count)) " edges."))
-      T
+      (setq build-result (graph-build-from-lines ss nil))
+      (if (null build-result)
+        (progn
+          (princ "\n[main] Error: graph-build-from-lines returned nil.")
+          nil
+        )
+        (progn
+          (graph-floyd-compute)
+          (princ (strcat "\n[main] Graph: " (itoa (graph-get-node-count)) " nodes, "
+                         (itoa (graph-get-edge-count)) " edges."))
+          T
+        )
+      )
     )
     (progn
       (princ "\n[main] Error: No lines found for graph.")
       nil
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch1
+;;;  Branch 1: No room points, has junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch1 (junction-ss / gjx-list gjx-name-list
+                                       i ent base-pt proj-info proj-pt proj-dist name
+                                       temp-ss)
+  (if (null junction-ss)
+    (progn
+      (princ "\n[main] Branch 1: junction selection set is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 1: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 1: No room, has junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq i 0)
+          (repeat (sslength junction-ss)
+            (setq ent (ssname junction-ss i))
+            (setq base-pt (block-get-base-point ent))
+            (if base-pt
+              (progn
+                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (if proj-info
+                  (progn
+                    (setq proj-pt (cadr proj-info))
+                    (setq proj-dist (caddr proj-info))
+                    (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 base-pt) (cons 11 proj-pt)))
+                    (setq name (block-get-name-from-text ent nil))
+                    (if (null name) (setq name "JNX"))
+                    (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
+                    (setq gjx-name-list (cons name gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+          (setq gjx-list (reverse gjx-list))
+          (setq gjx-name-list (reverse gjx-name-list))
+          (list gjx-list gjx-name-list)
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch2
+;;;  Branch 2: Has room points, has junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch2 (junction-ss room-pts / gjx-list gjx-name-list
+                                        i ent base-pt proj-info proj-pt proj-dist name
+                                        y tmp-pt temp-ss)
+  (if (or (null junction-ss) (null room-pts))
+    (progn
+      (princ "\n[main] Branch 2: junction-ss or room-pts is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 2: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 2: Has room, has junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq y 0)
+          (repeat (length room-pts)
+            (setq tmp-pt (nth y room-pts))
+            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (if proj-info
+              (progn
+                (setq proj-pt (cadr proj-info))
+                (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 tmp-pt) (cons 11 proj-pt)))
+                (if (= y 0)
+                  (progn
+                    (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
+                    (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq y (1+ y))
+          )
+          (setq y 0)
+          (repeat (1- (length room-pts))
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth y room-pts)) (cons 11 (nth (1+ y) room-pts))))
+            (setq y (1+ y))
+          )
+          (if (> (length room-pts) 1)
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth 0 room-pts)) (cons 11 (nth (1- (length room-pts)) room-pts))))
+          )
+          (setq i 0)
+          (repeat (sslength junction-ss)
+            (setq ent (ssname junction-ss i))
+            (setq base-pt (block-get-base-point ent))
+            (if base-pt
+              (progn
+                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (if proj-info
+                  (progn
+                    (setq proj-pt (cadr proj-info))
+                    (setq proj-dist (caddr proj-info))
+                    (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 base-pt) (cons 11 proj-pt)))
+                    (setq name (block-get-name-from-text ent nil))
+                    (if (null name) (setq name "JNX"))
+                    (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
+                    (setq gjx-name-list (cons name gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+          (setq gjx-list (reverse gjx-list))
+          (setq gjx-name-list (reverse gjx-name-list))
+          (list gjx-list gjx-name-list)
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch3
+;;;  Branch 3: Has room points, no junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch3 (room-pts / gjx-list gjx-name-list
+                                       y tmp-pt proj-info proj-pt
+                                       temp-ss)
+  (if (null room-pts)
+    (progn
+      (princ "\n[main] Branch 3: room-pts is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 3: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 3: Has room, no junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq y 0)
+          (repeat (length room-pts)
+            (setq tmp-pt (nth y room-pts))
+            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (if proj-info
+              (progn
+                (setq proj-pt (cadr proj-info))
+                (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 tmp-pt) (cons 11 proj-pt)))
+                (if (= y 0)
+                  (progn
+                    (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
+                    (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq y (1+ y))
+          )
+          (setq y 0)
+          (repeat (1- (length room-pts))
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth y room-pts)) (cons 11 (nth (1+ y) room-pts))))
+            (setq y (1+ y))
+          )
+          (if (> (length room-pts) 1)
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth 0 room-pts)) (cons 11 (nth (1- (length room-pts)) room-pts))))
+          )
+          (list gjx-list gjx-name-list)
+        )
+      )
     )
   )
 )
@@ -354,147 +611,23 @@
 ;;;  Returns: (gjx_list gjx_name_list) where gjx_list = ((pt . dist) ...)
 ;;;---------------------------------------------------------------
 (defun main-process-room-points (junction-ss room-pts / gjx-list gjx-name-list
-                                       i ent base-pt proj-pt proj-dist name
+                                       i ent base-pt proj-pt proj-dist proj-info name
                                        y tmp-pt tmp-proj j)
-  (setq gjx-list nil)
-  (setq gjx-name-list nil)
-
   (cond
-    ;; Branch 1: No room points, has junctions
     ((and (null room-pts) junction-ss)
-     (princ "\n[main] Branch 1: No room, has junctions.")
-     (setq i 0)
-     (repeat (sslength junction-ss)
-       (setq ent (ssname junction-ss i))
-       (setq base-pt (block-get-base-point ent))
-       (if base-pt
-         (progn
-           (setq proj-info (device-project-to-graph base-pt nil nil))
-           (if proj-info
-             (progn
-               (setq proj-pt (cadr proj-info))
-               (setq proj-dist (caddr proj-info))
-               ;; Draw connection line on temp layer
-               (setvar "clayer" *main-temp-layer*)
-               (command-s "_.line" "_non" (trans base-pt 0 1) "_non" (trans proj-pt 0 1) "")
-               (setq name (block-get-name-from-text ent nil))
-               (if (null name) (setq name "JNX"))
-               (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
-               (setq gjx-name-list (cons name gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq i (1+ i))
-     )
-     (setq gjx-list (reverse gjx-list))
-     (setq gjx-name-list (reverse gjx-name-list))
-    )
+     (main-process-branch1 junction-ss))
 
-    ;; Branch 2: Has room points, has junctions
     ((and room-pts junction-ss)
-     (princ "\n[main] Branch 2: Has room, has junctions.")
-     ;; Connect room points to graph
-     (setq y 0)
-     (repeat (length room-pts)
-       (setq tmp-pt (nth y room-pts))
-       (setq proj-info (device-project-to-graph tmp-pt nil nil))
-       (if proj-info
-         (progn
-           (setq proj-pt (cadr proj-info))
-           (setvar "clayer" *main-temp-layer*)
-           (command-s "_.line" "_non" (trans tmp-pt 0 1) "_non" (trans proj-pt 0 1) "")
-           ;; First room point becomes a target (like junction)
-           (if (= y 0)
-             (progn
-               (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
-               (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq y (1+ y))
-     )
-     ;; Connect room points to each other (closed loop)
-     (setq y 0)
-     (repeat (1- (length room-pts))
-       (command-s "_.line" "_non" (trans (nth y room-pts) 0 1)
-                            "_non" (trans (nth (1+ y) room-pts) 0 1) "")
-       (setq y (1+ y))
-     )
-     (if (> (length room-pts) 1)
-       (command-s "_.line" "_non" (trans (nth 0 room-pts) 0 1)
-                          "_non" (trans (nth (1- (length room-pts)) room-pts) 0 1) "")
-     )
-     ;; Process junctions
-     (setq i 0)
-     (repeat (sslength junction-ss)
-       (setq ent (ssname junction-ss i))
-       (setq base-pt (block-get-base-point ent))
-       (if base-pt
-         (progn
-           (setq proj-info (device-project-to-graph base-pt nil nil))
-           (if proj-info
-             (progn
-               (setq proj-pt (cadr proj-info))
-               (setq proj-dist (caddr proj-info))
-               (setvar "clayer" *main-temp-layer*)
-               (command-s "_.line" "_non" (trans base-pt 0 1) "_non" (trans proj-pt 0 1) "")
-               (setq name (block-get-name-from-text ent nil))
-               (if (null name) (setq name "JNX"))
-               (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
-               (setq gjx-name-list (cons name gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq i (1+ i))
-     )
-     (setq gjx-list (reverse gjx-list))
-     (setq gjx-name-list (reverse gjx-name-list))
-    )
+     (main-process-branch2 junction-ss room-pts))
 
-    ;; Branch 3: Has room points, no junctions
     ((and room-pts (null junction-ss))
-     (princ "\n[main] Branch 3: Has room, no junctions.")
-     (setq y 0)
-     (repeat (length room-pts)
-       (setq tmp-pt (nth y room-pts))
-       (setq proj-info (device-project-to-graph tmp-pt nil nil))
-       (if proj-info
-         (progn
-           (setq proj-pt (cadr proj-info))
-           (setvar "clayer" *main-temp-layer*)
-           (command-s "_.line" "_non" (trans tmp-pt 0 1) "_non" (trans proj-pt 0 1) "")
-           (if (= y 0)
-             (progn
-               (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
-               (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq y (1+ y))
-     )
-     ;; Connect room points to each other (closed loop)
-     (setq y 0)
-     (repeat (1- (length room-pts))
-       (command-s "_.line" "_non" (trans (nth y room-pts) 0 1)
-                          "_non" (trans (nth (1+ y) room-pts) 0 1) "")
-       (setq y (1+ y))
-     )
-     (if (> (length room-pts) 1)
-       (command-s "_.line" "_non" (trans (nth 0 room-pts) 0 1)
-                          "_non" (trans (nth (1- (length room-pts)) room-pts) 0 1) "")
-     )
-    )
+     (main-process-branch3 room-pts))
 
     (T
      (princ "\n[main] No room points and no junctions.")
+     (list nil nil)
     )
   )
-
-  (list gjx-list gjx-name-list)
 )
 
 ;;;---------------------------------------------------------------
@@ -507,9 +640,7 @@
   (if ss
     (progn
       (equiv-process-all ss)
-      ;; Remove duplicates again after adding equiv lines
       (dup-remove-all nil *main-temp-layer*)
-      ;; Recompute Floyd after adding equivalent edges
       (graph-floyd-compute)
       (princ "\n[main] Equivalent points processed.")
       T
@@ -522,42 +653,58 @@
 ;;;  main-get-camera-blocks
 ;;;  Get camera block selection set
 ;;;---------------------------------------------------------------
-(defun main-get-camera-blocks (/ ss result)
-  (setq result (ssadd))
-  (foreach blk-name *main-camera-blocks*
-    (setq ss (block-get-all-on-layer nil blk-name))
-    (if ss
-      (progn
-        (setq i 0)
-        (repeat (sslength ss)
-          (setq result (ssadd (ssname ss i) result))
-          (setq i (1+ i))
+(defun main-get-camera-blocks (/ ss result i)
+  (if (null *main-camera-blocks*)
+    (progn
+      (princ "\n[main] Warning: *main-camera-blocks* is nil.")
+      nil
+    )
+    (progn
+      (setq result (ssadd))
+      (foreach blk-name *main-camera-blocks*
+        (setq ss (block-get-all-on-layer nil blk-name))
+        (if ss
+          (progn
+            (setq i 0)
+            (repeat (sslength ss)
+              (setq result (ssadd (ssname ss i) result))
+              (setq i (1+ i))
+            )
+          )
         )
       )
+      (if (> (sslength result) 0) result nil)
     )
   )
-  (if (> (sslength result) 0) result nil)
 )
 
 ;;;---------------------------------------------------------------
 ;;;  main-get-junction-blocks
 ;;;  Get junction block selection set
 ;;;---------------------------------------------------------------
-(defun main-get-junction-blocks (/ ss result)
-  (setq result (ssadd))
-  (foreach blk-name *main-junction-blocks*
-    (setq ss (block-get-all-on-layer nil blk-name))
-    (if ss
-      (progn
-        (setq i 0)
-        (repeat (sslength ss)
-          (setq result (ssadd (ssname ss i) result))
-          (setq i (1+ i))
+(defun main-get-junction-blocks (/ ss result i)
+  (if (null *main-junction-blocks*)
+    (progn
+      (princ "\n[main] Warning: *main-junction-blocks* is nil.")
+      nil
+    )
+    (progn
+      (setq result (ssadd))
+      (foreach blk-name *main-junction-blocks*
+        (setq ss (block-get-all-on-layer nil blk-name))
+        (if ss
+          (progn
+            (setq i 0)
+            (repeat (sslength ss)
+              (setq result (ssadd (ssname ss i) result))
+              (setq i (1+ i))
+            )
+          )
         )
       )
+      (if (> (sslength result) 0) result nil)
     )
   )
-  (if (> (sslength result) 0) result nil)
 )
 
 ;;;---------------------------------------------------------------
@@ -571,44 +718,43 @@
                               tmp-dis end-dis best-jnx best-name
                               dev-node graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
-                              end-drawlist m_n)
+                              end-drawlist m_n main-workflow-error)
   (princ "\n\n=== CCTV System Workflow ===")
 
-  ;; Step 1: Environment setup (Berni_Start)
+  (defun main-workflow-error (msg)
+    (princ (strcat "\n[main] Error: " msg))
+    (vl-catch-all-apply 'main-cleanup nil)
+    (vl-catch-all-apply 'main-dktc nil)
+    (vl-catch-all-apply 'main-env-end nil)
+  )
+
   (main-env-start)
+  (setq *error* main-workflow-error)
   (main-init)
   (setq workflow-ok T)
 
-  ;; Step 2: Get user input for diagram insertion point
   (setq draw-pts (getpoint "\nSystem diagram insertion point: "))
   (if (null draw-pts) (setq draw-pts (list 0.0 0.0 0.0)))
 
-  ;; Step 3: Turn off non-working layers (gbtc)
   (main-gbtc)
 
-  ;; Step 4: Process cable trays (MLINE -> LINE)
   (if (null (main-process-cable-trays))
     (princ "\n[main] Warning: Cable tray processing returned nil.")
   )
 
-  ;; Step 5: Remove duplicates
   (princ "\n[main] Removing duplicates...")
   (dup-remove-all nil *main-temp-layer*)
 
-  ;; Step 6: Process room entry points (three-branch logic)
   (setq junction-ss (main-get-junction-blocks))
   (setq room-result (main-process-room-points junction-ss *main-room-points*))
   (setq gjx-list (car room-result))
   (setq gjx-name-list (cadr room-result))
 
-  ;; Step 7: Process equivalent points
   (main-process-equivalent-points)
 
-  ;; Step 8: Break all intersections
   (princ "\n[main] Breaking intersections...")
   (break-lines-all (list *main-temp-layer* *main-temp-layer2*))
 
-  ;; Step 9: Build graph
   (if (null (main-build-graph))
     (progn
       (princ "\n[main] Workflow aborted: graph build failed.")
@@ -616,140 +762,132 @@
     )
   )
 
-  ;; Step 10-12: Process cameras
   (if workflow-ok
     (progn
-      ;; Turn off cable tray layer during calculation
       (if *main-cable-tray-layer*
         (command-s "_.layer" "_off" *main-cable-tray-layer* "")
       )
 
-      (setq cameras (main-get-camera-blocks))
-      (if (null cameras)
+      (if (null *main-camera-blocks*)
         (progn
-          (princ "\n[main] Error: No cameras found.")
+          (princ "\n[main] Error: *main-camera-blocks* is nil, no cameras configured.")
           (setq workflow-ok nil)
         )
       )
 
       (if workflow-ok
         (progn
-          (princ (strcat "\n[main] Processing " (itoa (sslength cameras)) " cameras..."))
-          (setq end-drawlist nil)
-          (setq i 0)
+          (setq cameras (main-get-camera-blocks))
+          (if (null cameras)
+            (progn
+              (princ "\n[main] Error: No cameras found.")
+              (setq workflow-ok nil)
+            )
+          )
 
-          (repeat (sslength cameras)
-            (setq ent (ssname cameras i))
-            (setq base-pt (block-get-base-point ent))
-            (if base-pt
-              (progn
-                ;; Get camera block name and camera name from nearby text
-                (setq blk-name (cdr (assoc 2 (entget ent))))
-                (setq dev-name (block-get-name-from-text ent nil))
-                (if (null dev-name) (setq dev-name "CAM"))
+          (if workflow-ok
+            (progn
+              (princ (strcat "\n[main] Processing " (itoa (sslength cameras)) " cameras..."))
+              (setq end-drawlist nil)
+              (setq i 0)
 
-                ;; Project camera to graph
-                (setq proj-info (device-project-to-graph base-pt nil nil))
-                (if proj-info
+              (repeat (sslength cameras)
+                (setq ent (ssname cameras i))
+                (setq base-pt (block-get-base-point ent))
+                (if base-pt
                   (progn
-                    (setq proj-pt (cadr proj-info))
-                    (setq proj-dist (caddr proj-info))
+                    (setq blk-name (cdr (assoc 2 (entget ent))))
+                    (setq dev-name (block-get-name-from-text ent nil))
+                    (if (null dev-name) (setq dev-name "CAM"))
 
-                    ;; Find best junction
-                    ;; Original checks closest 3 by straight-line distance,
-                    ;; but checking all is more accurate (improvement)
-                    (setq end-dis 1000000.0)
-                    (setq best-jnx nil)
-                    (setq best-name nil)
+                    (setq proj-info (device-project-to-graph base-pt nil nil))
+                    (if proj-info
+                      (progn
+                        (setq proj-pt (cadr proj-info))
+                        (setq proj-dist (caddr proj-info))
 
-                    (setq m_n 0)
-                    (repeat (length gjx-list)
-                      (setq tmp-jnx (nth m_n gjx-list))
-                      (setq tmp-jnx-pt (car tmp-jnx))
-                      (setq tmp-jnx-dist (cdr tmp-jnx))
-                      (setq tmp-jnx-name (nth m_n gjx-name-list))
+                        (setq end-dis 1000000.0)
+                        (setq best-jnx nil)
+                        (setq best-name nil)
 
-                      ;; Calculate shortest path distance
-                      (setq dev-node (car proj-info))
-                      (setq jnx-node (graph-get-node-index tmp-jnx-pt))
-                      (if jnx-node
-                        (progn
-                          (setq graph-dist (graph-get-distance dev-node jnx-node))
-                          (if (and graph-dist (< graph-dist 1e29))
+                        (setq m_n 0)
+                        (repeat (length gjx-list)
+                          (setq tmp-jnx (nth m_n gjx-list))
+                          (setq tmp-jnx-pt (car tmp-jnx))
+                          (setq tmp-jnx-dist (cdr tmp-jnx))
+                          (setq tmp-jnx-name (nth m_n gjx-name-list))
+
+                          (setq dev-node (car proj-info))
+                          (setq jnx-node (graph-get-node-index tmp-jnx-pt))
+                          (if jnx-node
                             (progn
-                              ;; Distance formula: (graph_dist + dev_proj + jnx_proj) * coef + bias
-                              ;; Original uses different bias for room entry vs junction:
-                              ;;   room entry (jifang_ptt): jf_bias (default 25000)
-                              ;;   junction box: gjx_bias (default 10000)
-                              (setq use-bias
-                                (if (= tmp-jnx-name "RoomEntry")
-                                  *main-room-bias*
-                                  *main-junction-bias*))
-                              (setq tmp-dis (+ (* (+ graph-dist proj-dist tmp-jnx-dist)
-                                                   *main-cable-coefficient*)
-                                             use-bias))
-                              (if (< tmp-dis end-dis)
+                              (setq graph-dist (graph-get-distance dev-node jnx-node))
+                              (if (and graph-dist (< graph-dist 1e29))
                                 (progn
-                                  (setq end-dis tmp-dis)
-                                  (setq best-jnx tmp-jnx)
-                                  (setq best-name tmp-jnx-name)
+                                  (setq use-bias
+                                    (if (= tmp-jnx-name "RoomEntry")
+                                      *main-room-bias*
+                                      *main-junction-bias*))
+                                  (setq tmp-dis (+ (* (+ graph-dist proj-dist tmp-jnx-dist)
+                                                       *main-cable-coefficient*)
+                                             use-bias))
+                                  (if (< tmp-dis end-dis)
+                                    (progn
+                                      (setq end-dis tmp-dis)
+                                      (setq best-jnx tmp-jnx)
+                                      (setq best-name tmp-jnx-name)
+                                    )
+                                  )
                                 )
                               )
                             )
                           )
+                          (setq m_n (1+ m_n))
+                        )
+
+                        (if best-jnx
+                          (progn
+                            (setq end-drawlist
+                              (append end-drawlist
+                                      (list (list end-dis blk-name dev-name best-name))))
+                            (princ (strcat "\n  CAM: " dev-name " -> " best-name
+                                           " dist=" (rtos end-dis 2 0)))
+                          )
+                          (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
                         )
                       )
-                      (setq m_n (1+ m_n))
-                    )
-
-                    (if best-jnx
-                      (progn
-                        ;; Add to result: (distance block-name camera-name junction-name)
-                        (setq end-drawlist
-                          (append end-drawlist
-                                  (list (list end-dis blk-name dev-name best-name))))
-                        (princ (strcat "\n  CAM: " dev-name " -> " best-name
-                                       " dist=" (rtos end-dis 2 0)))
-                      )
-                      (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
+                      (princ (strcat "\n  CAM: " dev-name " -> projection failed"))
                     )
                   )
-                  (princ (strcat "\n  CAM: " dev-name " -> projection failed"))
                 )
+                (setq i (1+ i))
+              )
+
+              (if *main-cable-tray-layer*
+                (command-s "_.layer" "_on" *main-cable-tray-layer* "")
+              )
+
+              (main-dktc)
+
+              (setq end-drawlist (sysdiag-classify-by-junction end-drawlist))
+
+              (if end-drawlist
+                (progn
+                  (princ (strcat "\n[main] Drawing system diagram with "
+                                 (itoa (length end-drawlist)) " groups..."))
+                  (sysdiag-draw-classified draw-pts end-drawlist)
+                )
+                (princ "\n[main] Warning: No results to draw.")
               )
             )
-            (setq i (1+ i))
-          )
-
-          ;; Turn cable tray layer back on
-          (if *main-cable-tray-layer*
-            (command-s "_.layer" "_on" *main-cable-tray-layer* "")
-          )
-
-          ;; Step 13: Restore layers (dktc)
-          (main-dktc)
-
-          ;; Step 14: Classify results by junction
-          (setq end-drawlist (sysdiag-classify-by-junction end-drawlist))
-
-          ;; Step 15: Draw system diagram
-          (if end-drawlist
-            (progn
-              (princ (strcat "\n[main] Drawing system diagram with "
-                             (itoa (length end-drawlist)) " groups..."))
-              (sysdiag-draw-classified draw-pts end-drawlist)
-            )
-            (princ "\n[main] Warning: No results to draw.")
           )
         )
       )
     )
   )
 
-  ;; Step 16: Cleanup
   (main-cleanup)
 
-  ;; Step 17: Restore environment (Berni_End)
   (main-env-end)
 
   (if workflow-ok
@@ -800,7 +938,6 @@
       (setq val (param-get params "room_bias"))
       (if val (setq *main-room-bias* (atof (car val))))
 
-      ;; Restore bltc
       (setq val (param-get params "bltc_layers"))
       (if val (setq *main-bltc* val))
 

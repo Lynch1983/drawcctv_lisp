@@ -10,35 +10,27 @@
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
 (setq *device-search-radius* 1500.0)
-(setq *device-pipe-layer* nil)  ; Optional pipe layer for routing
+(setq *device-pipe-layer* nil)
 
 ;;;---------------------------------------------------------------
-;;;  device-find-nearest-line
-;;;  Find the nearest LINE entity to a point
-;;;  Args: pt       - point to project
-;;;         line-ss  - selection set of lines (nil = use filter)
-;;;         gllst    - optional DXF filter
+;;;  device-find-nearest-entity
+;;;  Internal helper: find nearest entity in a selection set
+;;;  Args: pt         - point to project
+;;;         entity-ss  - selection set of entities
+;;;         max-radius - maximum search radius
 ;;;  Returns: (entity closest-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-find-nearest-line (pt line-ss gllst / i ent min-ent min-pt min-dist cp d)
-  (if (null line-ss)
+(defun device-find-nearest-entity (pt entity-ss max-radius / i ent min-ent min-pt min-dist cp d)
+  (if entity-ss
     (progn
-      (if gllst
-        (setq line-ss (ssget "x" (append '((0 . "LINE")) gllst)))
-        (setq line-ss (ssget "x" '((0 . "LINE"))))
-      )
-    )
-  )
-  (if line-ss
-    (progn
-      (setq min-ent nil min-pt nil min-dist *device-search-radius*)
+      (setq min-ent nil min-pt nil min-dist max-radius)
       (setq i 0)
-      (repeat (sslength line-ss)
-        (setq ent (ssname line-ss i))
+      (repeat (sslength entity-ss)
+        (setq ent (ssname entity-ss i))
         (if ent
           (progn
-            (setq cp (line-get-closest-point ent pt))
-            (if cp
+            (setq cp (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+            (if (and cp (not (vl-catch-all-error-p cp)))
               (progn
                 (setq d (distance pt cp))
                 (if (< d min-dist)
@@ -57,6 +49,27 @@
       (if min-ent (list min-ent min-pt min-dist) nil)
     )
     nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  device-find-nearest-line
+;;;  Find the nearest LINE entity to a point
+;;;  Args: pt       - point to project
+;;;         line-ss  - selection set of lines (nil = use filter)
+;;;         gllst    - optional DXF filter
+;;;  Returns: (entity closest-point distance) or nil
+;;;---------------------------------------------------------------
+(defun device-find-nearest-line (pt line-ss gllst / ss)
+  (if (null line-ss)
+    (progn
+      (if gllst
+        (setq ss (ssget "x" (append '((0 . "LINE")) gllst)))
+        (setq ss (ssget "x" '((0 . "LINE"))))
+      )
+      (if ss (device-find-nearest-entity pt ss *device-search-radius*) nil)
+    )
+    (device-find-nearest-entity pt line-ss *device-search-radius*)
   )
 )
 
@@ -67,36 +80,8 @@
 ;;;         pipe-ss   - selection set of pipes
 ;;;  Returns: (entity closest-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-find-nearest-pipe (pt pipe-ss / i ent min-ent min-pt min-dist cp d)
-  (if pipe-ss
-    (progn
-      (setq min-ent nil min-pt nil min-dist *device-search-radius*)
-      (setq i 0)
-      (repeat (sslength pipe-ss)
-        (setq ent (ssname pipe-ss i))
-        (if ent
-          (progn
-            (setq cp (line-get-closest-point ent pt))
-            (if cp
-              (progn
-                (setq d (distance pt cp))
-                (if (< d min-dist)
-                  (progn
-                    (setq min-dist d)
-                    (setq min-pt cp)
-                    (setq min-ent ent)
-                  )
-                )
-              )
-            )
-          )
-        )
-        (setq i (1+ i))
-      )
-      (if min-ent (list min-ent min-pt min-dist) nil)
-    )
-    nil
-  )
+(defun device-find-nearest-pipe (pt pipe-ss)
+  (device-find-nearest-entity pt pipe-ss *device-search-radius*)
 )
 
 ;;;---------------------------------------------------------------
@@ -107,16 +92,13 @@
 ;;;         pipe-ss   - optional pipe selection set for routing
 ;;;  Returns: (graph-node-index projected-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-project-to-graph (pt line-ss pipe-ss / nearest pipe-nearest)
-  ;; First try direct projection to lines
+(defun device-project-to-graph (pt line-ss pipe-ss / nearest pipe-nearest node-idx)
   (setq nearest (device-find-nearest-line pt line-ss nil))
   (if nearest
     (progn
-      ;; Add projection point to graph
       (setq node-idx (graph-add-node (cadr nearest)))
       (list node-idx (cadr nearest) (caddr nearest))
     )
-    ;; Try pipe routing if available
     (if pipe-ss
       (progn
         (setq pipe-nearest (device-find-nearest-pipe pt pipe-ss))
@@ -146,12 +128,8 @@
   (if (null *graph-floyd-done*)
     (progn (princ "\n[device] Error: Floyd-Warshall not computed.") nil)
     (progn
-      ;; Get lines from temp layer only (not entire drawing)
-      (setq line-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
-      ;; Project device to graph
-      (setq dev-info (graph-project-point device-pt line-ss nil))
-      ;; Project target to graph
-      (setq tgt-info (graph-project-point target-pt line-ss nil))
+      (setq dev-info (graph-project-point device-pt nil nil))
+      (setq tgt-info (graph-project-point target-pt nil nil))
       (if (and dev-info tgt-info)
         (progn
           (setq graph-dist (graph-get-distance (car dev-info) (car tgt-info)))
@@ -204,62 +182,67 @@
 ;;;  Returns: list of (device-pt junction-pt distance device-name)
 ;;;---------------------------------------------------------------
 (defun device-process-all (device-blocks junction-blocks cable-coef junction-bias / device-list junction-list result i ent pt name best)
-  (princ "\n[device] Processing devices...")
-  
-  ;; Build device list
-  (setq device-list nil)
-  (if device-blocks
+  (if (or (null device-blocks) (null junction-blocks))
     (progn
-      (setq i 0)
-      (repeat (sslength device-blocks)
-        (setq ent (ssname device-blocks i))
-        (if ent
-          (progn
-            (setq pt (block-get-base-point ent))
-            (setq name (block-get-name-from-text ent nil))
-            (if pt
-              (setq device-list (cons (list pt ent name) device-list))
+      (princ "\n[device] Warning: No device or junction blocks provided.")
+      nil
+    )
+    (progn
+      (princ "\n[device] Processing devices...")
+
+      (setq device-list nil)
+      (if device-blocks
+        (progn
+          (setq i 0)
+          (repeat (sslength device-blocks)
+            (setq ent (ssname device-blocks i))
+            (if ent
+              (progn
+                (setq pt (block-get-base-point ent))
+                (setq name (block-get-name-from-text ent nil))
+                (if pt
+                  (setq device-list (cons (list pt ent name) device-list))
+                )
+              )
             )
+            (setq i (1+ i))
           )
         )
-        (setq i (1+ i))
       )
-    )
-  )
-  (princ (strcat "\n[device] Found " (itoa (length device-list)) " devices."))
-  
-  ;; Build junction list
-  (setq junction-list nil)
-  (if junction-blocks
-    (progn
-      (setq i 0)
-      (repeat (sslength junction-blocks)
-        (setq ent (ssname junction-blocks i))
-        (if ent
-          (progn
-            (setq pt (block-get-base-point ent))
-            (if pt
-              (setq junction-list (cons pt junction-list))
+      (princ (strcat "\n[device] Found " (itoa (length device-list)) " devices."))
+
+      (setq junction-list nil)
+      (if junction-blocks
+        (progn
+          (setq i 0)
+          (repeat (sslength junction-blocks)
+            (setq ent (ssname junction-blocks i))
+            (if ent
+              (progn
+                (setq pt (block-get-base-point ent))
+                (if pt
+                  (setq junction-list (cons pt junction-list))
+                )
+              )
             )
+            (setq i (1+ i))
           )
         )
-        (setq i (1+ i))
       )
+      (princ (strcat "\n[device] Found " (itoa (length junction-list)) " junctions."))
+
+      (setq result nil)
+      (foreach dev device-list
+        (setq best (device-find-best-junction (car dev) junction-list cable-coef junction-bias))
+        (if best
+          (setq result (cons (list (car dev) (car best) (cadr best) (caddr dev)) result))
+        )
+      )
+
+      (princ (strcat "\n[device] Connected " (itoa (length result)) " devices."))
+      result
     )
   )
-  (princ (strcat "\n[device] Found " (itoa (length junction-list)) " junctions."))
-  
-  ;; Find best junction for each device
-  (setq result nil)
-  (foreach dev device-list
-    (setq best (device-find-best-junction (car dev) junction-list cable-coef junction-bias))
-    (if best
-      (setq result (cons (list (car dev) (car best) (cadr best) (caddr dev)) result))
-    )
-  )
-  
-  (princ (strcat "\n[device] Connected " (itoa (length result)) " devices."))
-  result
 )
 
 ;;;---------------------------------------------------------------

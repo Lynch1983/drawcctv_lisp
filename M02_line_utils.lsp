@@ -13,11 +13,21 @@
 ;;;  Returns: (start-point end-point) or nil
 ;;;---------------------------------------------------------------
 (defun line-get-endpoints (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (if (= etype "LINE")
-    (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (null elist)
+        nil
+        (progn
+          (setq etype (cdr (assoc 0 elist)))
+          (if (= etype "LINE")
+            (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+            nil
+          )
+        )
+      )
+    )
   )
 )
 
@@ -28,8 +38,13 @@
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
 (defun line-get-startpoint (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 10 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 10 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -39,8 +54,13 @@
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
 (defun line-get-endpoint (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 11 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 11 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -63,10 +83,18 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: float length
 ;;;---------------------------------------------------------------
-(defun line-get-length-vl (ent)
+(defun line-get-length-vl (ent / result)
   (vl-load-com)
-  (- (vlax-curve-getDistAtParam ent (vlax-curve-getEndParam ent))
-     (vlax-curve-getDistAtParam ent (vlax-curve-getStartParam ent)))
+  (setq result (vl-catch-all-apply
+                 (function
+                   (lambda ()
+                     (- (vlax-curve-getDistAtParam ent (vlax-curve-getEndParam ent))
+                        (vlax-curve-getDistAtParam ent (vlax-curve-getStartParam ent)))))
+                 nil))
+  (if (vl-catch-all-error-p result)
+    nil
+    result
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -92,9 +120,13 @@
 ;;;         pt  - point list
 ;;;  Returns: point on line, or nil
 ;;;---------------------------------------------------------------
-(defun line-get-closest-point (ent pt)
+(defun line-get-closest-point (ent pt / result)
   (vl-load-com)
-  (vlax-curve-getClosestPointTo ent pt)
+  (setq result (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+  (if (vl-catch-all-error-p result)
+    nil
+    result
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -119,12 +151,15 @@
 ;;;         dist     - distance from start
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
-(defun line-point-at-distance (ent dist / param)
+(defun line-point-at-distance (ent dist / param pt)
   (vl-load-com)
   (setq param (vlax-curve-getParamAtDist ent dist))
-  (if param
-    (vlax-curve-getPointAtParam ent param)
+  (if (null param)
     nil
+    (progn
+      (setq pt (vlax-curve-getPointAtParam ent param))
+      (if (null pt) nil pt)
+    )
   )
 )
 
@@ -137,9 +172,9 @@
 ;;;---------------------------------------------------------------
 (defun line-distance-at-point (ent pt / cpt)
   (setq cpt (line-get-closest-point ent pt))
-  (if cpt
-    (vlax-curve-getDistAtPoint ent cpt)
+  (if (null cpt)
     nil
+    (vlax-curve-getDistAtPoint ent cpt)
   )
 )
 
@@ -151,31 +186,36 @@
 ;;;---------------------------------------------------------------
 (defun lines-get-intersection (ent1 ent2 / obj1 obj2 int-arr n pts k pt)
   (vl-load-com)
-  (setq obj1 (vlax-ename->vla-object ent1))
-  (setq obj2 (vlax-ename->vla-object ent2))
-  (if (and obj1 obj2)
+  (if (or (null ent1) (null ent2))
+    nil
     (progn
-      (setq int-arr (vl-catch-all-apply
-                      'vlax-safearray->list
-                      (list (vlax-variant-value
-                              (vla-intersectwith obj1 obj2 acExtendNone)))))
-      (if (and int-arr (not (vl-catch-all-error-p int-arr)))
+      (setq obj1 (vlax-ename->vla-object ent1))
+      (setq obj2 (vlax-ename->vla-object ent2))
+      (if (and obj1 obj2)
         (progn
-          (setq n (/ (length int-arr) 3))
-          (setq pts nil k 0)
-          (repeat n
-            (setq pt (list (nth (* k 3) int-arr)
-                           (nth (1+ (* k 3)) int-arr)
-                           0.0))
-            (setq pts (cons pt pts))
-            (setq k (1+ k))
+          (setq int-arr (vl-catch-all-apply
+                          'vlax-safearray->list
+                          (list (vlax-variant-value
+                                  (vla-intersectwith obj1 obj2 acExtendNone)))))
+          (if (and int-arr (not (vl-catch-all-error-p int-arr)))
+            (progn
+              (setq n (/ (length int-arr) 3))
+              (setq pts nil k 0)
+              (repeat n
+                (setq pt (list (nth (* k 3) int-arr)
+                               (nth (1+ (* k 3)) int-arr)
+                               0.0))
+                (setq pts (cons pt pts))
+                (setq k (1+ k))
+              )
+              (reverse pts)
+            )
+            nil
           )
-          (reverse pts)
         )
         nil
       )
     )
-    nil
   )
 )
 
@@ -249,9 +289,7 @@
       (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
       (setq dx (- x2 x1))
       (if (< (abs dx) 1e-10)
-        ;; vertical line: slope = nil, intercept = x value
         (list nil x1)
-        ;; normal line
         (progn
           (setq k (/ (- y2 y1) dx))
           (list k (- y1 (* k x1)))
@@ -290,7 +328,7 @@
   (setq dy (- (cadr p2) (cadr p1)))
   (setq len2 (+ (* dx dx) (* dy dy)))
   (if (< len2 1e-20)
-    p1  ; degenerate segment
+    p1
     (progn
       (setq t-param (/ (+ (* (- (car pt) (car p1)) dx)
                           (* (- (cadr pt) (cadr p1)) dy))
@@ -315,8 +353,13 @@
 ;;;  Returns: string layer name
 ;;;---------------------------------------------------------------
 (defun line-get-layer (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 8 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 8 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -327,8 +370,13 @@
 ;;;  Returns: modified entity (from entmod)
 ;;;---------------------------------------------------------------
 (defun line-set-layer (ent name / elist)
-  (setq elist (entget ent))
-  (entmod (subst (cons 8 name) (assoc 8 elist) elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (entmod (subst (cons 8 name) (assoc 8 elist) elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -337,12 +385,8 @@
 ;;;  Args: p1, p2 - point lists
 ;;;  Returns: entity name of new line
 ;;;---------------------------------------------------------------
-(defun line-create (p1 p2 / old-cmdecho ent)
-  (setq old-cmdecho (getvar "cmdecho"))
-  (setvar "cmdecho" 0)
-  (command-s "_.line" "_non" (trans p1 0 1) "_non" (trans p2 0 1) "")
-  (setq ent (entlast))
-  (setvar "cmdecho" old-cmdecho)
+(defun line-create (p1 p2 / ent)
+  (setq ent (entmakex (list (cons 0 "LINE") (cons 10 p1) (cons 11 p2))))
   ent
 )
 
@@ -353,11 +397,8 @@
 ;;;         layer - layer name string
 ;;;  Returns: entity name
 ;;;---------------------------------------------------------------
-(defun line-create-on-layer (p1 p2 layer / old-layer ent)
-  (setq old-layer (getvar "clayer"))
-  (setvar "clayer" layer)
-  (setq ent (line-create p1 p2))
-  (setvar "clayer" old-layer)
+(defun line-create-on-layer (p1 p2 layer / ent)
+  (setq ent (entmakex (list (cons 0 "LINE") (cons 8 layer) (cons 10 p1) (cons 11 p2))))
   ent
 )
 

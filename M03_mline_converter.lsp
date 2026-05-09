@@ -19,18 +19,22 @@
 ;;;  Returns: list of points or nil
 ;;;---------------------------------------------------------------
 (defun mline-get-vertices (ent / elist pts i n)
-  (setq elist (entget ent))
-  (setq pts nil)
-  (setq i 0)
-  (setq n (length elist))
-  ;; MLINE vertices are stored in group code 11
-  (repeat n
-    (if (= (car (nth i elist)) 11)
-      (setq pts (cons (cdr (nth i elist)) pts))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq pts nil)
+      (setq i 0)
+      (setq n (length elist))
+      (repeat n
+        (if (= (car (nth i elist)) 11)
+          (setq pts (cons (cdr (nth i elist)) pts))
+        )
+        (setq i (1+ i))
+      )
+      (reverse pts)
     )
-    (setq i (1+ i))
   )
-  (reverse pts)
 )
 
 ;;;---------------------------------------------------------------
@@ -40,24 +44,29 @@
 ;;;         layer - target layer name (nil = current layer)
 ;;;  Returns: selection set of created lines
 ;;;---------------------------------------------------------------
-(defun mline-convert-to-lines (ent layer / pts i n ss old-layer)
-  (setq pts (mline-get-vertices ent))
-  (setq ss (ssadd))
-  (if (and pts (> (length pts) 1))
+(defun mline-convert-to-lines (ent layer / pts i n ss new-ent)
+  (if (null ent)
     (progn
-      (setq old-layer (getvar "clayer"))
-      (if layer (setvar "clayer" layer))
-      (setq i 0)
-      (setq n (1- (length pts)))
-      (repeat n
-        (command-s "_.line" (nth i pts) (nth (1+ i) pts) "")
-        (setq ss (ssadd (entlast) ss))
-        (setq i (1+ i))
+      (setq ss (ssadd))
+      ss
+    )
+    (progn
+      (setq pts (mline-get-vertices ent))
+      (setq ss (ssadd))
+      (if (and pts (> (length pts) 1))
+        (progn
+          (setq i 0)
+          (setq n (1- (length pts)))
+          (repeat n
+            (setq new-ent (entmakex (list (cons 0 "LINE") (cons 8 (if layer layer (getvar "clayer"))) (cons 10 (nth i pts)) (cons 11 (nth (1+ i) pts)))))
+            (if new-ent (setq ss (ssadd new-ent ss)))
+            (setq i (1+ i))
+          )
+        )
       )
-      (if layer (setvar "clayer" old-layer))
+      ss
     )
   )
-  ss
 )
 
 ;;;---------------------------------------------------------------
@@ -122,14 +131,15 @@
 ;;;         gllst - optional DXF filter for line selection
 ;;;  Returns: selection set of nearby lines
 ;;;---------------------------------------------------------------
-(defun mline-find-nearby-lines (pt radius gllst / pt1 pt2 filter)
+(defun mline-find-nearby-lines (pt radius gllst / pt1 pt2 filter ss)
   (setq pt1 (polar pt (* pi 0.75) radius))
   (setq pt2 (polar pt (* pi -0.25) radius))
   (setq filter (list (cons 0 "LINE")))
   (if gllst
     (setq filter (append filter gllst))
   )
-  (ssget "_c" pt1 pt2 filter)
+  (setq ss (ssget "_c" pt1 pt2 filter))
+  (if (null ss) nil ss)
 )
 
 ;;;---------------------------------------------------------------
@@ -139,27 +149,22 @@
 ;;;  Returns: T if proper intersection, nil otherwise
 ;;;---------------------------------------------------------------
 (defun mline-check-intersect (ent1 ent2 / pts1 pts2 int-pts ep1 ep2 tol is-endpoint-p found)
-  ;; Check if two lines have a proper crossing (not just touching at endpoints)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
-  (setq int-pts (lines-get-intersection ent1 ent2))
-  (if (null int-pts)
-    nil  ; no intersection at all
+  (setq int-pts (vl-catch-all-apply 'lines-get-intersection (list ent1 ent2)))
+  (if (or (null int-pts) (vl-catch-all-error-p int-pts))
+    nil
     (progn
       (setq tol 1.0)
-      ;; Collect all 4 endpoints
       (setq ep1 (list (car pts1) (cadr pts1)))
       (setq ep2 (list (car pts2) (cadr pts2)))
-      ;; Check if any intersection point is NOT at an endpoint
-      ;; If so, the lines properly cross each other
       (setq found nil)
       (foreach ipt int-pts
-        ;; Check if this intersection is near any endpoint
         (if (and (not (< (distance ipt (car pts1)) tol))
                  (not (< (distance ipt (cadr pts1)) tol))
                  (not (< (distance ipt (car pts2)) tol))
                  (not (< (distance ipt (cadr pts2)) tol)))
-          (setq found T)  ; intersection is NOT at any endpoint = proper crossing
+          (setq found T)
         )
       )
       found
@@ -176,7 +181,7 @@
 ;;;         gllst - filter for line selection
 ;;;  Returns: T if connection made, nil otherwise
 ;;;---------------------------------------------------------------
-(defun mline-connect-endpoint (line-ent endpoint threshold gllst / pt nearby-lines i near-ent near-pts closest-pt min-dist closest-ent)
+(defun mline-connect-endpoint (line-ent endpoint threshold gllst / pt nearby-lines i near-ent near-pts closest-pt min-dist closest-ent proj-pt d)
   (setq pt (if (= endpoint 'start)
              (line-get-startpoint line-ent)
              (line-get-endpoint line-ent)
@@ -184,7 +189,6 @@
   (setq nearby-lines (mline-find-nearby-lines pt threshold gllst))
   (if nearby-lines
     (progn
-      ;; Remove self from selection
       (setq nearby-lines (ssdel line-ent nearby-lines))
       (if (> (sslength nearby-lines) 0)
         (progn
@@ -194,7 +198,6 @@
           (repeat (sslength nearby-lines)
             (setq near-ent (ssname nearby-lines i))
             (setq near-pts (line-get-endpoints near-ent))
-            ;; Check both endpoints of nearby line
             (foreach np near-pts
               (setq d (distance pt np))
               (if (< d min-dist)
@@ -207,20 +210,15 @@
             )
             (setq i (1+ i))
           )
-          ;; If found close endpoint and no proper intersection, create connection
           (if (and closest-pt
                    (not (mline-check-intersect line-ent closest-ent)))
             (progn
-              ;; Get closest point on the nearby line
-              (setq proj-pt (line-get-closest-point closest-ent pt))
-              (if proj-pt
+              (setq proj-pt (vl-catch-all-apply 'line-get-closest-point (list closest-ent pt)))
+              (if (and proj-pt (not (vl-catch-all-error-p proj-pt)))
                 (progn
-                  ;; Create connection line
-                  (command-s "_.line" pt proj-pt "")
-                  ;; Check if zero length and delete if so
-                  (setq new-ent (entlast))
-                  (if (= 0 (line-get-length new-ent))
-                    (command-s "_.erase" new-ent "")
+                  (setq new-ent (entmakex (list (cons 0 "LINE") (cons 10 pt) (cons 11 proj-pt))))
+                  (if (and new-ent (= 0 (line-get-length new-ent)))
+                    (entdel new-ent)
                   )
                   T
                 )
@@ -281,32 +279,29 @@
 ;;;  Returns: selection set of all created lines
 ;;;---------------------------------------------------------------
 (defun mline-process-all (mline-layer-list target-layer connect-threshold gllst / mline-ss all-lines count)
-  (princ (strcat "\n[mline] Processing MLINEs on layers: " 
-                 (if (listp mline-layer-list) 
+  (princ (strcat "\n[mline] Processing MLINEs on layers: "
+                 (if (listp mline-layer-list)
                    (apply 'strcat (mapcar '(lambda (x) (strcat x ",")) mline-layer-list))
                    mline-layer-list)))
-  
-  ;; Get MLINEs
+
   (setq mline-ss (mline-get-all-on-layer mline-layer-list))
-  
+
   (if (null mline-ss)
     (progn
       (princ "\n[mline] No MLINEs found.")
       nil
     )
     (progn
-      ;; Convert to lines
       (princ (strcat "\n[mline] Converting " (itoa (sslength mline-ss)) " MLINEs..."))
       (setq all-lines (mline-convert-selection mline-ss target-layer))
-      
-      ;; Connect endpoints
+
       (if (null connect-threshold)
         (setq connect-threshold *mline-connect-threshold*)
       )
       (princ (strcat "\n[mline] Connecting endpoints within " (rtos connect-threshold 2 0) " units..."))
       (setq count (mline-connect-all-endpoints all-lines connect-threshold gllst))
       (princ (strcat "\n[mline] Created " (itoa count) " connection lines."))
-      
+
       (princ (strcat "\n[mline] Done. Total lines: " (itoa (sslength all-lines))))
       all-lines
     )
@@ -439,8 +434,8 @@
   (setq old-thresh (mline-get-threshold))
   (mline-set-threshold 2000.0)
   (if (= (mline-get-threshold) 2000.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (mline-set-threshold old-thresh)  ; restore
     )

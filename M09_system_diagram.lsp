@@ -10,19 +10,18 @@
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters (matching original)
 ;;;---------------------------------------------------------------
-(setq *sysdiag-column-spacing* 12000.0)   ; Column spacing between groups
-(setq *sysdiag-block-offset* 6000.0)      ; Horizontal offset for block insertion
-(setq *sysdiag-text-height* 250.0)        ; Text height for labels
-(setq *sysdiag-rect-width* 1000.0)        ; Rectangle width around groups
-(setq *sysdiag-init-y-offset* 1019.0)     ; Initial Y offset (polar angle ~-11deg)
-(setq *sysdiag-init-angle* (/ pi -16.4))  ; Initial polar angle
-(setq *sysdiag-min-row-spacing* 700.0)    ; Minimum row spacing
-(setq *sysdiag-cable-label-prefix* "SXTGDDL")  ; Cable label prefix (was Chinese)
-(setq *sysdiag-dist-unit* 1000.0)         ; Distance unit divisor (mm to m)
+(setq *sysdiag-column-spacing* 12000.0)
+(setq *sysdiag-block-offset* 6000.0)
+(setq *sysdiag-text-height* 250.0)
+(setq *sysdiag-rect-width* 1000.0)
+(setq *sysdiag-init-y-offset* 1019.0)
+(setq *sysdiag-init-angle* (/ pi -16.4))
+(setq *sysdiag-min-row-spacing* 700.0)
+(setq *sysdiag-cable-label-prefix* "SXTGDDL")
+(setq *sysdiag-dist-unit* 1000.0)
 
-;;; Block bounding box globals (set during insertion)
-(setq *sysdiag-gj-heigh* nil)             ; Block height (set by sysdiag-insert-block)
-(setq *sysdiag-gj-length* nil)            ; Block width (set by sysdiag-insert-block)
+(setq *sysdiag-gj-heigh* nil)
+(setq *sysdiag-gj-length* nil)
 
 ;;;---------------------------------------------------------------
 ;;;  sysdiag-extract-number
@@ -58,29 +57,51 @@
 ;;;  Returns: list of groups, each group is a list of items
 ;;;           ((group1-item1 group1-item2 ...) (group2-item1 ...) ...)
 ;;;---------------------------------------------------------------
-(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx)
-  (setq i 0)
-  (setq end nil)
-  (setq end-drawlist lst)
-  (while end-drawlist
-    (setq tmp-lst (list (car end-drawlist)))
-    ;; Get junction name from 4th element (nth 3)
-    (setq tmp-gjx (nth 3 (car tmp-lst)))
-    (setq end-drawlist (cdr end-drawlist))
-    (setq i 0)
-    (repeat (length end-drawlist)
-      (if (= (nth 3 (nth i end-drawlist)) tmp-gjx)
-        (progn
-          (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
-          (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
+(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx catch-result)
+  (if (null lst)
+    nil
+    (progn
+      (setq i 0)
+      (setq end nil)
+      (setq end-drawlist lst)
+      (while end-drawlist
+        (setq tmp-lst (list (car end-drawlist)))
+        (setq catch-result
+          (vl-catch-all-apply
+            '(lambda ()
+              (nth 3 (car tmp-lst))
+            )
+          )
         )
-        (setq i (1+ i))
+        (if (vl-catch-all-error-p catch-result)
+          (setq tmp-gjx nil)
+          (setq tmp-gjx catch-result)
+        )
+        (setq end-drawlist (cdr end-drawlist))
+        (setq i 0)
+        (repeat (length end-drawlist)
+          (setq catch-result
+            (vl-catch-all-apply
+              '(lambda ()
+                (nth 3 (nth i end-drawlist))
+              )
+            )
+          )
+          (if (and (not (vl-catch-all-error-p catch-result))
+                   (= catch-result tmp-gjx))
+            (progn
+              (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
+              (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
+            )
+            (setq i (1+ i))
+          )
+        )
+        (setq end (append (list tmp-lst) end))
+        (setq i 0)
       )
+      end
     )
-    (setq end (append (list tmp-lst) end))
-    (setq i 0)
   )
-  end
 )
 
 ;;;---------------------------------------------------------------
@@ -91,21 +112,42 @@
 ;;;        name - block name
 ;;;  Side effects: sets *sysdiag-gj-heigh* and *sysdiag-gj-length*
 ;;;---------------------------------------------------------------
-(defun sysdiag-insert-block (pts name / tmp-block p1 p2 gj-pts gj-jidian)
+(defun sysdiag-insert-block (pts name / tmp-block p1 p2 gj-pts gj-jidian bbox-result)
   (command-s "_.insert" name pts "" "" 0)
   (setq tmp-block (entlast))
-  (vla-GetBoundingBox (vlax-ename->vla-object tmp-block) 'p1 'p2)
-  (setq p1 (vlax-safearray->list p1))
-  (setq p2 (vlax-safearray->list p2))
-  (setq *sysdiag-gj-heigh* (- (cadr p2) (cadr p1)))
-  (setq *sysdiag-gj-length* (- (car p2) (car p1)))
-  ;; Calculate geometric center (vertical midpoint)
-  (setq gj-pts (polar p1 (/ pi 2) (/ *sysdiag-gj-heigh* 2.0)))
-  ;; Get actual insertion point of the block
-  (setq gj-jidian (cdr (assoc 10 (entget tmp-block))))
-  ;; Move block so geometric center aligns with insertion point
-  (command-s "_.move" (entlast) "" gj-pts gj-jidian)
-  (princ)
+  (if (null tmp-block)
+    (progn
+      (princ "\n[sysdiag] Error: entlast returned nil after block insert")
+      nil
+    )
+    (progn
+      (setq bbox-result
+        (vl-catch-all-apply
+          'vla-GetBoundingBox
+          (list (vlax-ename->vla-object tmp-block) 'p1 'p2)
+        )
+      )
+      (if (vl-catch-all-error-p bbox-result)
+        (progn
+          (princ (strcat "\n[sysdiag] Error: GetBoundingBox failed - "
+                         (vl-catch-all-error-message bbox-result)))
+          (setq *sysdiag-gj-heigh* nil)
+          (setq *sysdiag-gj-length* nil)
+          nil
+        )
+        (progn
+          (setq p1 (vlax-safearray->list p1))
+          (setq p2 (vlax-safearray->list p2))
+          (setq *sysdiag-gj-heigh* (- (cadr p2) (cadr p1)))
+          (setq *sysdiag-gj-length* (- (car p2) (car p1)))
+          (setq gj-pts (polar p1 (/ pi 2) (/ *sysdiag-gj-heigh* 2.0)))
+          (setq gj-jidian (cdr (assoc 10 (entget tmp-block))))
+          (command-s "_.move" (entlast) "" gj-pts gj-jidian)
+          (princ)
+        )
+      )
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -122,87 +164,79 @@
                                        tmp-drawblockname tmp-textpts
                                        tmp-textstr tmp-namepts i m
                                        tmp-draw)
-  (setq cm (getvar "cmdecho"))
-  (setq os (getvar "osmode"))
-  (setvar "cmdecho" 0)
-  (setvar "osmode" 0)
-  (setvar "clayer" "0")
-  (setq end lst)
-  (setq i 0)
-  (setq m 0)
-
-  ;; Process each group (column)
-  (repeat (length end)
-    ;; Get current group and sort by camera name number (ascending)
-    (setq tmp-draw (nth m end))
-    (setq tmp-draw
-      (vl-sort tmp-draw
-        '(lambda (e1 e2)
-           (< (atof (sysdiag-extract-number (caddr e1)))
-              (atof (sysdiag-extract-number (caddr e2)))))))
-
-    ;; Set starting Y position for this column
-    (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
-
-    ;; Draw each device in this group (rows)
-    (repeat (length tmp-draw)
-      ;; Draw horizontal connection line
-      (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
-      (command-s "_.pline" htd-p1 end-p1 "")
-
-      ;; Get block info
-      (setq tmp-drawblock (nth i tmp-draw))
-      (setq tmp-drawblockname (nth 1 tmp-drawblock))
-
-      ;; Cable length label position (slightly right of start)
-      (setq tmp-textpts (polar htd-p1 0.2 250.0))
-      ;; Cable length label: "SXTGDDL-XXm"
-      (setq tmp-textstr
-        (strcat *sysdiag-cable-label-prefix* "-"
-                (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
-                "m"))
-
-      ;; Insert camera block at end point
-      (sysdiag-insert-block end-p1 tmp-drawblockname)
-
-      ;; Camera name label (right of block)
-      (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
-      (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
-      (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 2 tmp-drawblock))
-
-      (setq i (1+ i))
-
-      ;; Move to next row (downward)
-      (if (> (+ *sysdiag-gj-heigh* 100.0) *sysdiag-min-row-spacing*)
-        (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
-        (setq htd-p1 (polar htd-p1 (* pi 1.5) *sysdiag-min-row-spacing*))
-      )
+  (if (null lst)
+    (progn
+      (princ "\n[sysdiag] Error: nil list passed to sysdiag-draw-classified")
+      nil
     )
+    (progn
+      (setq cm (getvar "cmdecho"))
+      (setq os (getvar "osmode"))
+      (setvar "cmdecho" 0)
+      (setvar "osmode" 0)
+      (setvar "clayer" "0")
+      (setq end lst)
+      (setq i 0)
+      (setq m 0)
 
-    ;; Draw rectangle around this group
-    ;; Height = distance from htd to htd-p1 + 200 margin
-    (setq htd-pt1 (polar htd (* pi 1.5)
-                         (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
-    (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-    (setq htd-pt3 (polar htd-pt2 (* pi 0.5)
-                         (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
-    (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+      (repeat (length end)
+        (setq tmp-draw (nth m end))
+        (setq tmp-draw
+          (vl-sort tmp-draw
+            '(lambda (e1 e2)
+               (< (atof (sysdiag-extract-number (caddr e1)))
+                  (atof (sysdiag-extract-number (caddr e2)))))))
 
-    ;; Junction name label (upper-left of rectangle)
-    (command-s "_.text" (polar htd (* pi 0.7) 400.0)
-               *sysdiag-text-height* 0 (nth 3 (car tmp-draw)))
+        (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
 
-    ;; Move to next column (rightward)
-    (setq m (1+ m))
-    (setq i 0)
-    (setq htd (polar htd 0 *sysdiag-column-spacing*))
+        (repeat (length tmp-draw)
+          (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
+          (command-s "_.pline" htd-p1 end-p1 "")
+
+          (setq tmp-drawblock (nth i tmp-draw))
+          (setq tmp-drawblockname (nth 1 tmp-drawblock))
+
+          (setq tmp-textpts (polar htd-p1 0.2 250.0))
+          (setq tmp-textstr
+            (strcat *sysdiag-cable-label-prefix* "-"
+                    (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
+                    "m"))
+
+          (sysdiag-insert-block end-p1 tmp-drawblockname)
+
+          (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
+          (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
+          (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 2 tmp-drawblock))
+
+          (setq i (1+ i))
+
+          (if (> (+ *sysdiag-gj-heigh* 100.0) *sysdiag-min-row-spacing*)
+            (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
+            (setq htd-p1 (polar htd-p1 (* pi 1.5) *sysdiag-min-row-spacing*))
+          )
+        )
+
+        (setq htd-pt1 (polar htd (* pi 1.5)
+                             (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
+        (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
+        (setq htd-pt3 (polar htd-pt2 (* pi 0.5)
+                             (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
+        (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+
+        (command-s "_.text" (polar htd (* pi 0.7) 400.0)
+                   *sysdiag-text-height* 0 (nth 3 (car tmp-draw)))
+
+        (setq m (1+ m))
+        (setq i 0)
+        (setq htd (polar htd 0 *sysdiag-column-spacing*))
+      )
+
+      (setq *sysdiag-gj-heigh* nil)
+      (setvar "cmdecho" cm)
+      (setvar "osmode" os)
+      T
+    )
   )
-
-  ;; Clear block height/width
-  (setq *sysdiag-gj-heigh* nil)
-  (setvar "cmdecho" cm)
-  (setvar "osmode" os)
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -218,85 +252,77 @@
                                 tmp-drawblockname tmp-textpts
                                 tmp-textstr tmp-namepts i m
                                 tmp-draw actual-height)
-  (setq cm (getvar "cmdecho"))
-  (setq os (getvar "osmode"))
-  (setvar "cmdecho" 0)
-  (setvar "osmode" 0)
-  (setvar "clayer" "0")
-  (setq end lst)
-  (setq i 0)
-  (setq m 0)
-
-  ;; Sort entire list by name (2nd element) ascending
-  (setq end (vl-sort end '(lambda (e1 e2) (< (cadr e1) (cadr e2)))))
-
-  ;; Set starting Y position
-  (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
-
-  ;; Draw each HJX device
-  (repeat (length end)
-    ;; Draw horizontal connection line
-    (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
-    (command-s "_.pline" htd-p1 end-p1 "")
-
-    ;; Get block info
-    (setq tmp-drawblock (nth m end))
-    ;; Block name from entity
-    (setq tmp-drawblockname
-      (cdr (assoc 2 (entget (nth 2 tmp-drawblock)))))
-
-    ;; Cable label position
-    (setq tmp-textpts (polar htd-p1 0.2 250.0))
-    ;; Cable label: "HJXXL-XXm"
-    (setq tmp-textstr
-      (strcat "HJXXL-"
-              (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
-              "m"))
-
-    ;; Insert block
-    (sysdiag-insert-block end-p1 tmp-drawblockname)
-
-    ;; Name label (right of block)
-    (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
-    (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
-    (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 1 tmp-drawblock))
-
-    (setq i (1+ i))
-
-    ;; Move to next row
-    (if (> (+ *sysdiag-gj-heigh* 100.0) 550.0)
-      (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
-      (setq htd-p1 (polar htd-p1 (* pi 1.5) 100.0))
-    )
-
-    (setq m (1+ m))
-    (setq i 0)
-  )
-
-  ;; Draw rectangle around all HJX devices
-  (setq actual-height (- (cadr htd) (cadr htd-p1)))
-  (setq htd-pt1 (polar htd (* pi 1.5) actual-height))
-  (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-  (setq htd-pt3 (polar htd-pt2 (* pi 0.5) actual-height))
-
-  ;; If height exceeds 18800, use actual height; otherwise use 18800
-  (if (> actual-height 18800.0)
-    (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+  (if (null lst)
     (progn
-      (setq htd-pt1 (polar htd (* pi 1.5) 18800.0))
+      (princ "\n[sysdiag] Error: nil list passed to sysdiag-draw-hjx")
+      nil
+    )
+    (progn
+      (setq cm (getvar "cmdecho"))
+      (setq os (getvar "osmode"))
+      (setvar "cmdecho" 0)
+      (setvar "osmode" 0)
+      (setvar "clayer" "0")
+      (setq end lst)
+      (setq i 0)
+      (setq m 0)
+
+      (setq end (vl-sort end '(lambda (e1 e2) (< (cadr e1) (cadr e2)))))
+
+      (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
+
+      (repeat (length end)
+        (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
+        (command-s "_.pline" htd-p1 end-p1 "")
+
+        (setq tmp-drawblock (nth m end))
+        (setq tmp-drawblockname
+          (cdr (assoc 2 (entget (nth 2 tmp-drawblock)))))
+
+        (setq tmp-textpts (polar htd-p1 0.2 250.0))
+        (setq tmp-textstr
+          (strcat "HJXXL-"
+                  (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
+                  "m"))
+
+        (sysdiag-insert-block end-p1 tmp-drawblockname)
+
+        (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
+        (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
+        (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 1 tmp-drawblock))
+
+        (setq i (1+ i))
+
+        (if (> (+ *sysdiag-gj-heigh* 100.0) 550.0)
+          (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
+          (setq htd-p1 (polar htd-p1 (* pi 1.5) 100.0))
+        )
+
+        (setq m (1+ m))
+        (setq i 0)
+      )
+
+      (setq actual-height (- (cadr htd) (cadr htd-p1)))
+      (setq htd-pt1 (polar htd (* pi 1.5) actual-height))
       (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-      (setq htd-pt3 (polar htd-pt2 (* pi 0.5) 18800.0))
-      (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+      (setq htd-pt3 (polar htd-pt2 (* pi 0.5) actual-height))
+
+      (if (> actual-height 18800.0)
+        (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+        (progn
+          (setq htd-pt1 (polar htd (* pi 1.5) 18800.0))
+          (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
+          (setq htd-pt3 (polar htd-pt2 (* pi 0.5) 18800.0))
+          (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+        )
+      )
+
+      (setq *sysdiag-gj-heigh* nil)
+      (setvar "cmdecho" cm)
+      (setvar "osmode" os)
+      T
     )
   )
-
-  ;; Note: draw_BDXrec (semi-fixed diagram) is NOT included
-  ;; per refactoring requirement to remove semi-fixed diagram drawing
-
-  (setq *sysdiag-gj-heigh* nil)
-  (setvar "cmdecho" cm)
-  (setvar "osmode" os)
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -344,7 +370,7 @@
 ;;;         layer    - layer name
 ;;;---------------------------------------------------------------
 (defun sysdiag-draw-cable-line (start-pt end-pt length layer / mid-pt)
-  (command-s "_.line" start-pt end-pt "")
+  (entmakex (list (cons 0 "LINE") (cons 8 layer) (cons 10 start-pt) (cons 11 end-pt)))
   (setq mid-pt (list (/ (+ (car start-pt) (car end-pt)) 2.0)
                      (/ (+ (cadr start-pt) (cadr end-pt)) 2.0)
                      0.0))
@@ -368,10 +394,8 @@
   (princ (strcat "\n[sysdiag] Drawing system diagram for "
                  (itoa (length device-list)) " devices..."))
 
-  ;; Group by junction
   (setq grouped (sysdiag-group-by-junction device-list))
 
-  ;; Draw each junction group
   (setq current-y (cadr ins-pt))
   (foreach group grouped
     (setq jnx-devices (sysdiag-sort-devices (cdr group)))
@@ -392,12 +416,10 @@
   (setq x (car ins-pt))
   (setq y start-y)
 
-  ;; Draw junction box
   (command-s "_.rectang" (list x y 0.0) (list (+ x 500.0) (+ y 300.0) 0.0))
   (command-s "_.text" "_j" "_m" (list (+ x 250.0) (+ y 150.0) 0.0)
              *sysdiag-text-height* "0" "Junction")
 
-  ;; Draw each device connection
   (foreach dev devices
     (setq y (- y *sysdiag-min-row-spacing*))
     (sysdiag-draw-cable-line (list (+ x 500.0) (+ y 150.0) 0.0)

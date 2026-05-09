@@ -28,10 +28,18 @@
 ;;;  Returns: pair id
 ;;;---------------------------------------------------------------
 (defun equiv-add-pair (pt1 pt2 / id)
-  (setq id *equiv-next-id*)
-  (setq *equiv-pairs* (cons (list (list pt1 pt2) id) *equiv-pairs*))
-  (setq *equiv-next-id* (1+ *equiv-next-id*))
-  id
+  (if (or (null pt1) (null pt2))
+    (progn
+      (princ "\n[equiv] Error: nil point passed to equiv-add-pair")
+      nil
+    )
+    (progn
+      (setq id *equiv-next-id*)
+      (setq *equiv-pairs* (cons (list (list pt1 pt2) id) *equiv-pairs*))
+      (setq *equiv-next-id* (1+ *equiv-next-id*))
+      id
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -58,15 +66,23 @@
 ;;;  Returns: number of connections made
 ;;;---------------------------------------------------------------
 (defun equiv-process-all (line-ss / count)
-  (setq count 0)
-  (princ (strcat "\n[equiv] Processing " (itoa (length *equiv-pairs*)) " equivalent pairs..."))
-  (foreach pair *equiv-pairs*
-    (if (equiv-connect-pair (car pair) line-ss)
-      (setq count (1+ count))
+  (if (null line-ss)
+    (progn
+      (princ "\n[equiv] Error: nil selection set in equiv-process-all")
+      0
+    )
+    (progn
+      (setq count 0)
+      (princ (strcat "\n[equiv] Processing " (itoa (length *equiv-pairs*)) " equivalent pairs..."))
+      (foreach pair *equiv-pairs*
+        (if (equiv-connect-pair (car pair) line-ss)
+          (setq count (1+ count))
+        )
+      )
+      (princ (strcat "\n[equiv] Connected " (itoa count) " pairs."))
+      count
     )
   )
-  (princ (strcat "\n[equiv] Connected " (itoa count) " pairs."))
-  count
 )
 
 ;;;---------------------------------------------------------------
@@ -76,19 +92,40 @@
 ;;;         line-ss - selection set of lines
 ;;;  Returns: T if connected, nil otherwise
 ;;;---------------------------------------------------------------
-(defun equiv-connect-pair (pt-pair line-ss / pt1 pt2 proj1 proj2)
+(defun equiv-connect-pair (pt-pair line-ss / pt1 pt2 proj1 proj2 edge-result)
   (setq pt1 (car pt-pair))
   (setq pt2 (cadr pt-pair))
-  ;; Project both points to graph
   (setq proj1 (device-project-to-graph pt1 line-ss nil))
-  (setq proj2 (device-project-to-graph pt2 line-ss nil))
-  ;; Add edge between the two projected nodes
-  (if (and proj1 proj2)
+  (if (null proj1)
     (progn
-      (graph-add-edge (car proj1) (car proj2) (distance (cadr proj1) (cadr proj2)))
-      T
+      (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt1")
+      nil
     )
-    nil
+    (progn
+      (setq proj2 (device-project-to-graph pt2 line-ss nil))
+      (if (null proj2)
+        (progn
+          (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt2")
+          nil
+        )
+        (progn
+          (setq edge-result
+            (vl-catch-all-apply
+              'graph-add-edge
+              (list (car proj1) (car proj2) (distance (cadr proj1) (cadr proj2)))
+            )
+          )
+          (if (vl-catch-all-error-p edge-result)
+            (progn
+              (princ (strcat "\n[equiv] Error: graph-add-edge failed - "
+                             (vl-catch-all-error-message edge-result)))
+              nil
+            )
+            T
+          )
+        )
+      )
+    )
   )
 )
 

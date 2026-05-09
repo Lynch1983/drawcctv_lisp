@@ -19,10 +19,15 @@
 ;;;  Returns: point list or nil
 ;;;---------------------------------------------------------------
 (defun block-get-insertion-point (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 10 elist))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 10 elist))
+        nil
+      )
+    )
   )
 )
 
@@ -33,10 +38,15 @@
 ;;;  Returns: string block name or nil
 ;;;---------------------------------------------------------------
 (defun block-get-name (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 2 elist))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 2 elist))
+        nil
+      )
+    )
   )
 )
 
@@ -47,8 +57,13 @@
 ;;;  Returns: string layer name
 ;;;---------------------------------------------------------------
 (defun block-get-layer (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 8 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 8 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -58,14 +73,19 @@
 ;;;  Returns: (x-scale y-scale z-scale) or nil
 ;;;---------------------------------------------------------------
 (defun block-get-scale (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (list
-      (cdr (assoc 41 elist))
-      (cdr (assoc 42 elist))
-      (cdr (assoc 43 elist))
-    )
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (list
+          (cdr (assoc 41 elist))
+          (cdr (assoc 42 elist))
+          (cdr (assoc 43 elist))
+        )
+        nil
+      )
+    )
   )
 )
 
@@ -76,10 +96,15 @@
 ;;;  Returns: float angle in radians
 ;;;---------------------------------------------------------------
 (defun block-get-rotation (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 50 elist))
-    0.0
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 50 elist))
+        0.0
+      )
+    )
   )
 )
 
@@ -122,7 +147,7 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: float area or 0
 ;;;---------------------------------------------------------------
-(defun block-entity-get-area (ent / elist etype obj area)
+(defun block-entity-get-area (ent / elist etype obj area r)
   (setq elist (entget ent))
   (setq etype (cdr (assoc 0 elist)))
   (cond
@@ -133,10 +158,15 @@
     ((= etype "LWPOLYLINE")
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (if (= (vla-get-closed obj) :vlax-true)
-       (vlax-get obj 'area)
-       0.0
-     )
+     (setq area (vl-catch-all-apply
+       '(lambda ()
+          (if (= (vla-get-closed obj) :vlax-true)
+            (vlax-get obj 'area)
+            0.0
+          )
+        )
+     ))
+     (if (vl-catch-all-error-p area) 0.0 area)
     )
     ((or (= etype "POLYLINE") (= etype "REGION") (= etype "SOLID"))
      (vl-load-com)
@@ -209,12 +239,12 @@
     ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (vlax-get obj 'Centroid)
+     (vl-catch-all-apply '(lambda () (vlax-get obj 'Centroid)))
     )
     (T
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (vlax-get obj 'InsertionPoint)
+     (vl-catch-all-apply '(lambda () (vlax-get obj 'InsertionPoint)))
     )
   )
 )
@@ -228,7 +258,8 @@
 ;;;---------------------------------------------------------------
 (defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation)
   (setq block-name (block-get-name ent))
-  (if block-name
+  (if (null block-name)
+    nil
     (progn
       (setq largest-ent (block-find-largest-entity block-name))
       (if largest-ent
@@ -237,14 +268,11 @@
           (setq insertion (block-get-insertion-point ent))
           (setq scale (block-get-scale ent))
           (setq rotation (block-get-rotation ent))
-          ;; Transform center to world coordinates
           (block-transform-point center insertion scale rotation)
         )
-        ;; Fallback: use insertion point
         (block-get-insertion-point ent)
       )
     )
-    nil
   )
 )
 
@@ -262,10 +290,8 @@
   (setq y (cadr pt))
   (setq sx (car scale))
   (setq sy (cadr scale))
-  ;; Apply scale
   (setq x (* x sx))
   (setq y (* y sy))
-  ;; Apply rotation
   (if (/= rotation 0.0)
     (progn
       (setq cos-r (cos rotation))
@@ -276,7 +302,6 @@
       (setq y y-new)
     )
   )
-  ;; Apply translation
   (list (+ x (car insertion))
         (+ y (cadr insertion))
         (+ (caddr pt) (caddr insertion)))
@@ -289,10 +314,13 @@
 ;;;         radius - search radius
 ;;;  Returns: (text-entity text-content distance) or nil
 ;;;---------------------------------------------------------------
-(defun block-find-nearest-text (pt radius / pt1 pt2 ss i ent content min-dist nearest)
+(defun block-find-nearest-text (pt radius / pt1 pt2 ss i ent content min-dist nearest dist)
   (setq pt1 (polar pt (* pi 0.75) radius))
   (setq pt2 (polar pt (* pi -0.25) radius))
-  (setq ss (ssget "_c" pt1 pt2 '((0 . "TEXT,MTEXT"))))
+  (setq ss (vl-catch-all-apply 'ssget (list "_c" pt1 pt2 '((0 . "TEXT,MTEXT")))))
+  (if (vl-catch-all-error-p ss)
+    (setq ss nil)
+  )
   (if ss
     (progn
       (setq min-dist radius)
@@ -331,16 +359,21 @@
 ;;;  Returns: string content or nil
 ;;;---------------------------------------------------------------
 (defun block-text-get-content (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (cond
-    ((= etype "TEXT")
-     (cdr (assoc 1 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq etype (cdr (assoc 0 elist)))
+      (cond
+        ((= etype "TEXT")
+         (cdr (assoc 1 elist))
+        )
+        ((= etype "MTEXT")
+         (cdr (assoc 1 elist))
+        )
+        (T nil)
+      )
     )
-    ((= etype "MTEXT")
-     (cdr (assoc 1 elist))
-    )
-    (T nil)
   )
 )
 
@@ -351,8 +384,13 @@
 ;;;  Returns: point list
 ;;;---------------------------------------------------------------
 (defun block-text-get-position (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 10 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 10 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -574,8 +612,8 @@
   (setq old-rad (block-get-search-radius))
   (block-set-search-radius 5000.0)
   (if (= (block-get-search-radius) 5000.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (block-set-search-radius old-rad)
     )

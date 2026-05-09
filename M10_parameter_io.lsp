@@ -20,14 +20,19 @@
 ;;;  Returns: list of substrings
 ;;;---------------------------------------------------------------
 (defun param-string-split (str delimiter / result pos)
-  (if (null delimiter) (setq delimiter ","))
-  (setq result nil)
-  (while (setq pos (vl-string-search delimiter str))
-    (setq result (cons (substr str 1 pos) result))
-    (setq str (substr str (+ pos 2)))
+  (if (or (null str) (= str ""))
+    nil
+    (progn
+      (if (null delimiter) (setq delimiter ","))
+      (setq result nil)
+      (while (setq pos (vl-string-search delimiter str))
+        (setq result (cons (substr str 1 pos) result))
+        (setq str (substr str (+ pos 2)))
+      )
+      (setq result (cons str result))
+      (reverse result)
+    )
   )
-  (setq result (cons str result))
-  (reverse result)
 )
 
 ;;;---------------------------------------------------------------
@@ -58,12 +63,10 @@
 (defun param-string-trim (str / start end)
   (setq start 1)
   (setq end (strlen str))
-  ;; Trim from start
   (while (and (<= start end)
               (wcmatch (substr str start 1) "[ ]"))
     (setq start (1+ start))
   )
-  ;; Trim from end
   (while (and (>= end start)
               (wcmatch (substr str end 1) "[ ]"))
     (setq end (1- end))
@@ -82,7 +85,6 @@
 ;;;---------------------------------------------------------------
 (defun param-parse-line (line / pos name values)
   (setq line (param-string-trim line))
-  ;; Skip empty lines and comments
   (if (or (= line "") (= (substr line 1 1) ";"))
     nil
     (progn
@@ -116,28 +118,53 @@
 ;;;  Args: filename - file path (nil = use default)
 ;;;  Returns: association list of parameters or nil
 ;;;---------------------------------------------------------------
-(defun param-load (filename / fp line params parsed)
+(defun param-load (filename / fp line params parsed read-result)
   (if (null filename)
     (setq filename *param-default-file*)
   )
-  (setq params nil)
-  (setq fp (open filename "r"))
-  (if fp
+  (if (null filename)
     (progn
-      (princ (strcat "\n[param] Loading from " filename "..."))
-      (while (setq line (read-line fp))
-        (setq parsed (param-parse-line line))
-        (if parsed
-          (setq params (cons parsed params))
-        )
-      )
-      (close fp)
-      (princ (strcat "\n[param] Loaded " (itoa (length params)) " parameters."))
-      (reverse params)
+      (princ "\n[param] Error: filename is nil after default lookup")
+      nil
     )
     (progn
-      (princ (strcat "\n[param] File not found: " filename))
-      nil
+      (setq params nil)
+      (setq read-result
+        (vl-catch-all-apply
+          '(lambda ()
+            (setq fp (open filename "r"))
+            (if fp
+              (progn
+                (princ (strcat "\n[param] Loading from " filename "..."))
+                (while (setq line (read-line fp))
+                  (setq parsed (param-parse-line line))
+                  (if parsed
+                    (setq params (cons parsed params))
+                  )
+                )
+                (close fp)
+                (princ (strcat "\n[param] Loaded " (itoa (length params)) " parameters."))
+                (reverse params)
+              )
+              (progn
+                (princ (strcat "\n[param] File not found: " filename))
+                nil
+              )
+            )
+          )
+        )
+      )
+      (if (vl-catch-all-error-p read-result)
+        (progn
+          (princ (strcat "\n[param] Error reading file: "
+                         (vl-catch-all-error-message read-result)))
+          (if (and fp (= (type fp) 'FILE))
+            (close fp)
+          )
+          nil
+        )
+        read-result
+      )
     )
   )
 )
@@ -149,30 +176,53 @@
 ;;;         filename - file path (nil = use default)
 ;;;  Returns: T on success, nil on failure
 ;;;---------------------------------------------------------------
-(defun param-save (params filename / fp)
-  (if (null filename)
-    (setq filename *param-default-file*)
-  )
-  (setq fp (open filename "w"))
-  (if fp
+(defun param-save (params filename / fp write-result)
+  (if (null params)
     (progn
-      (princ (strcat "\n[param] Saving to " filename "..."))
-      ;; Write header
-      (princ "; CCTV System Parameters\n" fp)
-      (princ "; Auto-generated file\n" fp)
-      (princ "\n" fp)
-      ;; Write parameters
-      (foreach param params
-        (princ (param-format-line (car param) (cadr param)) fp)
-        (princ "\n" fp)
-      )
-      (close fp)
-      (princ (strcat "\n[param] Saved " (itoa (length params)) " parameters."))
-      T
+      (princ "\n[param] Error: nil params passed to param-save")
+      nil
     )
     (progn
-      (princ (strcat "\n[param] Cannot write to: " filename))
-      nil
+      (if (null filename)
+        (setq filename *param-default-file*)
+      )
+      (setq write-result
+        (vl-catch-all-apply
+          '(lambda ()
+            (setq fp (open filename "w"))
+            (if fp
+              (progn
+                (princ (strcat "\n[param] Saving to " filename "..."))
+                (princ "; CCTV System Parameters\n" fp)
+                (princ "; Auto-generated file\n" fp)
+                (princ "\n" fp)
+                (foreach param params
+                  (princ (param-format-line (car param) (cadr param)) fp)
+                  (princ "\n" fp)
+                )
+                (close fp)
+                (princ (strcat "\n[param] Saved " (itoa (length params)) " parameters."))
+                T
+              )
+              (progn
+                (princ (strcat "\n[param] Cannot write to: " filename))
+                nil
+              )
+            )
+          )
+        )
+      )
+      (if (vl-catch-all-error-p write-result)
+        (progn
+          (princ (strcat "\n[param] Error writing file: "
+                         (vl-catch-all-error-message write-result)))
+          (if (and fp (= (type fp) 'FILE))
+            (close fp)
+          )
+          nil
+        )
+        write-result
+      )
     )
   )
 )
@@ -185,8 +235,13 @@
 ;;;  Returns: list of values or nil
 ;;;---------------------------------------------------------------
 (defun param-get (params name / entry)
-  (setq entry (assoc name params))
-  (if entry (cadr entry) nil)
+  (if (null params)
+    nil
+    (progn
+      (setq entry (assoc name params))
+      (if entry (cadr entry) nil)
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -198,10 +253,15 @@
 ;;;  Returns: updated parameter list
 ;;;---------------------------------------------------------------
 (defun param-set (params name values / entry)
-  (setq entry (assoc name params))
-  (if entry
-    (subst (list name values) entry params)
-    (cons (list name values) params)
+  (if (null params)
+    (list (list name values))
+    (progn
+      (setq entry (assoc name params))
+      (if entry
+        (subst (list name values) entry params)
+        (cons (list name values) params)
+      )
+    )
   )
 )
 
@@ -248,7 +308,6 @@
   (if (= str "")
     ""
     (progn
-      ;; Check if string represents a number
       (setq is-num T)
       (foreach ch (vl-string->list str)
         (if (and (/= ch 45) (/= ch 46) (< ch 48) (> ch 57))
@@ -405,8 +464,8 @@
   (if (and loaded
            (= (length loaded) 4)
            (param-get loaded "camera_blocks"))
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       ;; Cleanup
       (vl-file-delete test-file)
@@ -419,8 +478,8 @@
   (setq old-file (param-get-default-file))
   (param-set-default-file "new_params.txt")
   (if (= (param-get-default-file) "new_params.txt")
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (param-set-default-file old-file)
     )

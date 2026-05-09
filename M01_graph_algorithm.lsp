@@ -134,13 +134,11 @@
 ;;;  Returns: T if added, nil if duplicate
 ;;;---------------------------------------------------------------
 (defun graph-add-edge (nodeA nodeB weight / key adjA adjB)
-  ;; check duplicate
   (setq key (cons (min nodeA nodeB) (max nodeA nodeB)))
   (if (assoc key *graph-edges*)
-    nil  ; duplicate edge
+    nil
     (progn
       (setq *graph-edges* (cons (cons key weight) *graph-edges*))
-      ;; update adjacency list for nodeA
       (setq adjA (assoc nodeA *graph-adj*))
       (if adjA
         (setq *graph-adj*
@@ -148,7 +146,6 @@
         )
         (setq *graph-adj* (cons (list nodeA (cons nodeB weight)) *graph-adj*))
       )
-      ;; update adjacency list for nodeB
       (setq adjB (assoc nodeB *graph-adj*))
       (if adjB
         (setq *graph-adj*
@@ -191,19 +188,24 @@
 ;;;  Returns: list of point(s), nil if unsupported type
 ;;;---------------------------------------------------------------
 (defun graph-get-line-points (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (cond
-    ((= etype "LINE")
-     (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq etype (cdr (assoc 0 elist)))
+      (cond
+        ((= etype "LINE")
+         (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+        )
+        ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
+         (graph-get-polyline-points ent)
+        )
+        ((= etype "ARC")
+         (graph-get-arc-points ent)
+        )
+        (T nil)
+      )
     )
-    ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
-     (graph-get-polyline-points ent)
-    )
-    ((= etype "ARC")
-     (graph-get-arc-points ent)
-    )
-    (T nil)
   )
 )
 
@@ -213,24 +215,34 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: list of points
 ;;;---------------------------------------------------------------
-(defun graph-get-polyline-points (ent / obj pts n i pt)
+(defun graph-get-polyline-points (ent / obj pts n i pt result)
   (vl-load-com)
-  (setq obj (vlax-ename->vla-object ent))
-  (setq pts nil)
-  (if (= (vla-get-ObjectName obj) "AcDbPolyline")
-    (progn
-      (setq n (fix (vlax-get obj 'NumberOfVertices)))
-      (setq i 0)
-      (repeat n
-        (setq pt (vlax-get obj (strcat "Coordinate" (itoa i))))
-        (if pt
-          (setq pts (cons (list (car pt) (cadr pt) 0.0) pts))
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (setq obj (vlax-ename->vla-object ent))
+        (setq pts nil)
+        (if (= (vla-get-ObjectName obj) "AcDbPolyline")
+          (progn
+            (setq n (fix (vlax-get obj 'NumberOfVertices)))
+            (setq i 0)
+            (repeat n
+              (setq pt (vlax-get obj (strcat "Coordinate" (itoa i))))
+              (if pt
+                (setq pts (cons (list (car pt) (cadr pt) 0.0) pts))
+              )
+              (setq i (1+ i))
+            )
+            (reverse pts)
+          )
+          nil
         )
-        (setq i (1+ i))
       )
-      (reverse pts)
     )
+  )
+  (if (vl-catch-all-error-p result)
     nil
+    result
   )
 )
 
@@ -240,18 +252,28 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: list of 2 points (start, end)
 ;;;---------------------------------------------------------------
-(defun graph-get-arc-points (ent / obj center radius sa ea)
+(defun graph-get-arc-points (ent / obj center radius sa ea result)
   (vl-load-com)
-  (setq obj (vlax-ename->vla-object ent))
-  (setq center (vlax-get obj 'Center))
-  (setq radius (vlax-get obj 'Radius))
-  (setq sa (vlax-get obj 'StartAngle))
-  (setq ea (vlax-get obj 'EndAngle))
-  (list
-    (list (+ (car center) (* radius (cos sa)))
-          (+ (cadr center) (* radius (sin sa))) 0.0)
-    (list (+ (car center) (* radius (cos ea)))
-          (+ (cadr center) (* radius (sin ea))) 0.0)
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (setq obj (vlax-ename->vla-object ent))
+        (setq center (vlax-get obj 'Center))
+        (setq radius (vlax-get obj 'Radius))
+        (setq sa (vlax-get obj 'StartAngle))
+        (setq ea (vlax-get obj 'EndAngle))
+        (list
+          (list (+ (car center) (* radius (cos sa)))
+                (+ (cadr center) (* radius (sin sa))) 0.0)
+          (list (+ (car center) (* radius (cos ea)))
+                (+ (cadr center) (* radius (sin ea))) 0.0)
+        )
+      )
+    )
+  )
+  (if (vl-catch-all-error-p result)
+    nil
+    result
   )
 )
 
@@ -282,7 +304,7 @@
         (if ent
           (progn
             (setq pts (graph-get-line-points ent))
-            (if (= (length pts) 2)
+            (if (and pts (= (length pts) 2))
               (progn
                 (setq pt1 (car pts))
                 (setq pt2 (cadr pts))
@@ -321,7 +343,6 @@
       (setq n *graph-node-count*)
       (setq *graph-dist* nil)
 
-      ;; build initial distance matrix
       (setq i 0)
       (repeat n
         (setq row nil)
@@ -333,7 +354,7 @@
               (setq ew (graph-get-edge-weight i j))
               (if ew
                 (setq row (cons ew row))
-                (setq row (cons 1e30 row))  ; infinity
+                (setq row (cons 1e30 row))
               )
             )
           )
@@ -344,44 +365,48 @@
       )
       (setq *graph-dist* (reverse *graph-dist*))
 
-      (princ "\n[graph-floyd] Running optimization...")
+      (if (null *graph-dist*)
+        (progn (princ "\n[graph-floyd] Error: distance matrix is nil.") nil)
+        (progn
+          (princ "\n[graph-floyd] Running optimization...")
 
-      ;; Floyd-Warshall triple loop
-      (setq k 0)
-      (repeat n
-        (if (= (rem k 50) 0)
-          (princ (strcat "\r[graph-floyd] Progress: "
-                         (itoa k) "/" (itoa n)))
-        )
-        (setq i 0)
-        (repeat n
-          (setq dist_ik (nth k (nth i *graph-dist*)))
-          (if (< dist_ik 1e29)
-            (progn
-              (setq j 0)
-              (repeat n
-                (setq dist_kj (nth j (nth k *graph-dist*)))
-                (if (< dist_kj 1e29)
-                  (progn
-                    (setq new_dist (+ dist_ik dist_kj))
-                    (setq dist_ij (nth j (nth i *graph-dist*)))
-                    (if (< new_dist dist_ij)
-                      (graph-update-matrix i j new_dist)
+          (setq k 0)
+          (repeat n
+            (if (= (rem k 50) 0)
+              (princ (strcat "\r[graph-floyd] Progress: "
+                             (itoa k) "/" (itoa n)))
+            )
+            (setq i 0)
+            (repeat n
+              (setq dist_ik (nth k (nth i *graph-dist*)))
+              (if (< dist_ik 1e29)
+                (progn
+                  (setq j 0)
+                  (repeat n
+                    (setq dist_kj (nth j (nth k *graph-dist*)))
+                    (if (< dist_kj 1e29)
+                      (progn
+                        (setq new_dist (+ dist_ik dist_kj))
+                        (setq dist_ij (nth j (nth i *graph-dist*)))
+                        (if (< new_dist dist_ij)
+                          (graph-update-matrix i j new_dist)
+                        )
+                      )
                     )
+                    (setq j (1+ j))
                   )
                 )
-                (setq j (1+ j))
               )
+              (setq i (1+ i))
             )
+            (setq k (1+ k))
           )
-          (setq i (1+ i))
-        )
-        (setq k (1+ k))
-      )
 
-      (setq *graph-floyd-done* T)
-      (princ (strcat "\n[graph-floyd] Done."))
-      T
+          (setq *graph-floyd-done* T)
+          (princ (strcat "\n[graph-floyd] Done."))
+          T
+        )
+      )
     )
   )
 )
@@ -423,20 +448,22 @@
 (defun graph-get-distance (nodeA nodeB / row)
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph] Error: Floyd-Warshall not computed.") nil)
-    (if (and (< nodeA *graph-node-count*)
-             (< nodeB *graph-node-count*)
-             *graph-dist*)
-      (progn
-        (setq row (nth nodeA *graph-dist*))
-        (if (and row (< nodeB (length row)))
-          (progn
-            (setq d (nth nodeB row))
-            (if (< d 1e29) d nil)
+    (if (null *graph-dist*)
+      (progn (princ "\n[graph] Error: distance matrix is nil.") nil)
+      (if (and (< nodeA *graph-node-count*)
+               (< nodeB *graph-node-count*))
+        (progn
+          (setq row (nth nodeA *graph-dist*))
+          (if (and row (< nodeB (length row)))
+            (progn
+              (setq d (nth nodeB row))
+              (if (< d 1e29) d nil)
+            )
+            nil
           )
-          nil
         )
+        nil
       )
-      nil
     )
   )
 )
@@ -481,8 +508,8 @@
         (setq ent (ssname line-ss i))
         (if ent
           (progn
-            (setq tmp-pt (vlax-curve-getClosestPointTo ent pt))
-            (if tmp-pt
+            (setq tmp-pt (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+            (if (and tmp-pt (not (vl-catch-all-error-p tmp-pt)))
               (progn
                 (setq tmp-dis (distance pt tmp-pt))
                 (if (< tmp-dis min-dis)
@@ -511,7 +538,7 @@
 ;;;         gllst  - optional DXF filter
 ;;;  Returns: (node-index projected-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun graph-project-point (pt line-ss gllst / nearest)
+(defun graph-project-point (pt line-ss gllst / nearest nidx)
   (setq nearest (graph-find-nearest-edge pt line-ss gllst))
   (if nearest
     (progn
@@ -546,35 +573,32 @@
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph-assign] Error: Run graph-floyd-compute first.") nil)
     (progn
-      ;; Step 1: Project devices to graph
       (princ "\n[graph-assign] Step 1: Projecting devices...")
       (setq dev-nodes nil)
       (foreach dp device-list
         (setq dev-info (graph-project-point dp nil nil))
-        (if dev-info
+        (if (and dev-info (= (length dev-info) 3) (numberp (car dev-info)))
           (setq dev-nodes (cons (cons dp dev-info) dev-nodes))
         )
       )
       (princ (strcat "\n[graph-assign] Projected " (itoa (length dev-nodes)) " devices"))
 
-      ;; Step 2: Project junctions to graph
       (princ "\n[graph-assign] Step 2: Projecting junctions...")
       (setq jnx-nodes nil)
       (foreach jp junction-list
         (setq jnx-info (graph-project-point jp nil nil))
-        (if jnx-info
+        (if (and jnx-info (= (length jnx-info) 3) (numberp (car jnx-info)))
           (setq jnx-nodes (cons (cons jp jnx-info) jnx-nodes))
         )
       )
       (princ (strcat "\n[graph-assign] Projected " (itoa (length jnx-nodes)) " junctions"))
 
-      ;; Step 3: Match each device to best junction
       (princ "\n[graph-assign] Step 3: Matching...")
       (setq result nil)
       (foreach dev-entry (reverse dev-nodes)
         (setq dev-pt (car dev-entry))
         (setq dev-info (cdr dev-entry))
-        (if (= (length dev-info) 3)
+        (if (and dev-info (= (length dev-info) 3))
           (progn
             (setq dev-node (car dev-info))
             (setq dev-dist (caddr dev-info))
@@ -584,7 +608,7 @@
                 (foreach jnx-entry (reverse jnx-nodes)
                   (setq jnx-pt (car jnx-entry))
                   (setq jnx-info (cdr jnx-entry))
-                  (if (= (length jnx-info) 3)
+                  (if (and jnx-info (= (length jnx-info) 3))
                     (progn
                       (setq jnx-node (car jnx-info))
                       (setq jnx-dist (caddr jnx-info))
