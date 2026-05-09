@@ -1,6 +1,7 @@
 ;;;===============================================================
 ;;;  M04 - Duplicate Remover Module
 ;;;  Remove duplicate and overlapping line entities
+;;;  Optimized: spatial hash, endpoint hash, entmake
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
 ;;;  DEPENDENCIES: M02 (line_utils.lsp)
@@ -9,8 +10,8 @@
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
-;;;  *dup-tolerance* - Distance tolerance for duplicate detection
 (setq *dup-tolerance* 1.0)
+(setq *dup-cell-size* 5000.0)
 
 ;;;---------------------------------------------------------------
 ;;;  dup-line-get-key
@@ -28,9 +29,36 @@
       (setq min-y (min y1 y2))
       (setq dx (- x2 x1))
       (setq dy (- y2 y1))
-      ;; Handle vertical lines
       (if (< (abs dx) 1e-10)
-        (list nil x1 min-x min-y)  ; nil slope = vertical
+        (list nil x1 min-x min-y)
+        (progn
+          (setq slope (/ dy dx))
+          (setq intercept (- y1 (* slope x1)))
+          (list slope intercept min-x min-y)
+        )
+      )
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-line-get-key-from-pts
+;;;  Generate sort key from pre-computed endpoints (avoids entget)
+;;;  Args: pts - (pt1 pt2)
+;;;  Returns: (slope intercept min-x min-y) or nil
+;;;---------------------------------------------------------------
+(defun dup-line-get-key-from-pts (pts / x1 y1 x2 y2 dx dy slope intercept min-x min-y)
+  (if (and pts (= (length pts) 2))
+    (progn
+      (setq x1 (car (car pts)) y1 (cadr (car pts)))
+      (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
+      (setq min-x (min x1 x2))
+      (setq min-y (min y1 y2))
+      (setq dx (- x2 x1))
+      (setq dy (- y2 y1))
+      (if (< (abs dx) 1e-10)
+        (list nil x1 min-x min-y)
         (progn
           (setq slope (/ dy dx))
           (setq intercept (- y1 (* slope x1)))
@@ -51,22 +79,47 @@
 (defun dup-lines-colinear-p (ent1 ent2 / key1 key2)
   (setq key1 (dup-line-get-key ent1))
   (setq key2 (dup-line-get-key ent2))
+  (dup-keys-colinear-p key1 key2)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-keys-colinear-p
+;;;  Check if two keys represent colinear lines
+;;;  Args: key1, key2 - sort keys from dup-line-get-key
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun dup-keys-colinear-p (key1 key2 / tol)
+  (setq tol *dup-tolerance*)
   (if (and key1 key2)
-    (progn
-      ;; Check slope (handle nil for vertical)
+    (if (or (and (null (car key1)) (null (car key2)))
+            (and (car key1) (car key2)
+                 (< (abs (- (car key1) (car key2))) 0.001)))
       (if (or (and (null (car key1)) (null (car key2)))
-              (and (car key1) (car key2) 
-                   (< (abs (- (car key1) (car key2))) 0.001)))
-        ;; Check intercept
-        (if (or (and (null (car key1)) (null (car key2)))
-                (< (abs (- (cadr key1) (cadr key2))) *dup-tolerance*))
-          T
-          nil
-        )
+              (< (abs (- (cadr key1) (cadr key2))) tol))
+        T
         nil
       )
+      nil
     )
     nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-key-to-hash
+;;;  Convert a line key to a hash string for grouping
+;;;  Quantizes slope and intercept for approximate matching
+;;;  Args: key - (slope intercept min-x min-y)
+;;;  Returns: string hash like "S0.000_I0.0" or "V_1000.0"
+;;;---------------------------------------------------------------
+(defun dup-key-to-hash (key / slope-quant intercept-quant)
+  (if (null (car key))
+    (strcat "V_" (rtos (cadr key) 2 0))
+    (progn
+      (setq slope-quant (rtos (car key) 2 3))
+      (setq intercept-quant (rtos (cadr key) 2 0))
+      (strcat "S" slope-quant "_I" intercept-quant)
+    )
   )
 )
 
@@ -89,6 +142,23 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  dup-box-from-pts
+;;;  Get bounding box from pre-computed endpoints
+;;;  Args: pts - (pt1 pt2)
+;;;  Returns: (min-x min-y max-x max-y)
+;;;---------------------------------------------------------------
+(defun dup-box-from-pts (pts / x1 y1 x2 y2)
+  (if (and pts (= (length pts) 2))
+    (progn
+      (setq x1 (car (car pts)) y1 (cadr (car pts)))
+      (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
+      (list (min x1 x2) (min y1 y2) (max x1 x2) (max y1 y2))
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
 ;;;  dup-boxes-overlap-p
 ;;;  Check if two bounding boxes overlap
 ;;;  Args: box1, box2 - bounding boxes
@@ -97,10 +167,10 @@
 (defun dup-boxes-overlap-p (box1 box2 / tol)
   (setq tol *dup-tolerance*)
   (if (and box1 box2)
-    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))  ; box1 right < box2 left
-             (< (nth 2 box2) (- (nth 0 box1) tol))  ; box2 right < box1 left
-             (< (nth 3 box1) (- (nth 1 box2) tol))  ; box1 top < box2 bottom
-             (< (nth 3 box2) (- (nth 1 box1) tol)))) ; box2 top < box1 bottom
+    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))
+             (< (nth 2 box2) (- (nth 0 box1) tol))
+             (< (nth 3 box1) (- (nth 1 box2) tol))
+             (< (nth 3 box2) (- (nth 1 box1) tol))))
     nil
   )
 )
@@ -119,35 +189,46 @@
 
 ;;;---------------------------------------------------------------
 ;;;  dup-merge-two-lines
-;;;  Merge two overlapping colinear lines into one
+;;;  Merge two overlapping colinear lines into one using entmake
 ;;;  Args: ent1, ent2 - entity names
+;;;         layer - target layer (nil = use ent1's layer)
 ;;;  Returns: entity name of merged line (or nil)
 ;;;---------------------------------------------------------------
-(defun dup-merge-two-lines (ent1 ent2 / pts1 pts2 all-pts min-x max-x min-y max-y new-ent)
+(defun dup-merge-two-lines (ent1 ent2 / pts1 pts2 all-pts min-x max-x min-y max-y
+                                      dx1 dy1 elist layer new-ent p1 p2)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
   (if (and pts1 pts2)
     (progn
-      ;; Collect all 4 endpoints
       (setq all-pts (append pts1 pts2))
-      ;; Find extreme points
       (setq min-x (apply 'min (mapcar 'car all-pts)))
       (setq max-x (apply 'max (mapcar 'car all-pts)))
       (setq min-y (apply 'min (mapcar 'cadr all-pts)))
       (setq max-y (apply 'max (mapcar 'cadr all-pts)))
-      ;; Determine orientation from original line
       (setq dx1 (- (car (cadr pts1)) (car (car pts1))))
       (setq dy1 (- (cadr (cadr pts1)) (cadr (car pts1))))
-      ;; Create new line based on orientation
       (if (> (abs dx1) (abs dy1))
-        ;; More horizontal: use x extremes
-        (setq new-ent (line-create (list min-x (cadr (car pts1)) 0.0)
-                                   (list max-x (cadr (car pts1)) 0.0)))
-        ;; More vertical or diagonal: use y extremes
-        (setq new-ent (line-create (list (car (car pts1)) min-y 0.0)
-                                   (list (car (car pts1)) max-y 0.0)))
+        (progn
+          (setq p1 (list min-x (cadr (car pts1)) 0.0))
+          (setq p2 (list max-x (cadr (car pts1)) 0.0))
+        )
+        (progn
+          (setq p1 (list (car (car pts1)) min-y 0.0))
+          (setq p2 (list (car (car pts1)) max-y 0.0))
+        )
       )
-      ;; Delete original lines
+      (setq elist (entget ent1))
+      (setq layer (cdr (assoc 8 elist)))
+      (setq new-ent
+        (entmakex
+          (list
+            (cons 0 "LINE")
+            (cons 8 layer)
+            (cons 10 p1)
+            (cons 11 p2)
+          )
+        )
+      )
       (entdel ent1)
       (entdel ent2)
       new-ent
@@ -165,13 +246,21 @@
 (defun dup-lines-identical-p (ent1 ent2 / pts1 pts2 tol)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
+  (dup-pts-identical-p pts1 pts2)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-pts-identical-p
+;;;  Check if two endpoint pairs are identical
+;;;  Args: pts1, pts2 - (start end) point lists
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun dup-pts-identical-p (pts1 pts2 / tol)
   (setq tol *dup-tolerance*)
   (if (and pts1 pts2)
     (or
-      ;; Same direction
       (and (< (distance (car pts1) (car pts2)) tol)
            (< (distance (cadr pts1) (cadr pts2)) tol))
-      ;; Reversed direction
       (and (< (distance (car pts1) (cadr pts2)) tol)
            (< (distance (cadr pts1) (car pts2)) tol))
     )
@@ -180,39 +269,175 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  dup-remove-identical
-;;;  Remove identical lines from selection set
-;;;  Args: line-ss - selection set
-;;;  Returns: number of duplicates removed
+;;;  dup-endpoint-hash
+;;;  Create a hash string from sorted endpoint coordinates
+;;;  Used for O(1) duplicate lookup instead of O(n) comparison
+;;;  Args: pts - (pt1 pt2) endpoint list
+;;;  Returns: string hash "x1,y1,x2,y2" (sorted by x then y)
 ;;;---------------------------------------------------------------
-(defun dup-remove-identical (line-ss / i j ent1 ent2 count to-remove)
-  (setq count 0)
-  (setq to-remove nil)
+(defun dup-endpoint-hash (pts / p1 p2 x1 y1 x2 y2 tol-quant)
+  (setq tol-quant (fix (/ 1.0 *dup-tolerance*)))
+  (setq p1 (car pts))
+  (setq p2 (cadr pts))
+  (setq x1 (car p1) y1 (cadr p1))
+  (setq x2 (car p2) y2 (cadr p2))
+  (if (or (< x1 x2) (and (= x1 x2) (< y1 y2)))
+    (strcat (rtos (fix (* x1 tol-quant)) 2 0) ","
+            (rtos (fix (* y1 tol-quant)) 2 0) ","
+            (rtos (fix (* x2 tol-quant)) 2 0) ","
+            (rtos (fix (* y2 tol-quant)) 2 0))
+    (strcat (rtos (fix (* x2 tol-quant)) 2 0) ","
+            (rtos (fix (* y2 tol-quant)) 2 0) ","
+            (rtos (fix (* x1 tol-quant)) 2 0) ","
+            (rtos (fix (* y1 tol-quant)) 2 0))
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-spatial-hash
+;;;  Compute spatial hash cell keys for a line's bounding box
+;;;  Returns list of cell keys the line touches
+;;;  Args: box - (min-x min-y max-x max-y)
+;;;         cell-size - spatial grid cell size
+;;;  Returns: list of string cell keys
+;;;---------------------------------------------------------------
+(defun dup-spatial-hash (box cell-size / min-cx min-cy max-cx max-cy cx cy cells)
+  (setq min-cx (fix (/ (nth 0 box) cell-size)))
+  (setq min-cy (fix (/ (nth 1 box) cell-size)))
+  (setq max-cx (fix (/ (nth 2 box) cell-size)))
+  (setq max-cy (fix (/ (nth 3 box) cell-size)))
+  (setq cells nil)
+  (setq cx min-cx)
+  (while (<= cx max-cx)
+    (setq cy min-cy)
+    (while (<= cy max-cy)
+      (setq cells (cons (strcat (itoa cx) "_" (itoa cy)) cells))
+      (setq cy (1+ cy))
+    )
+    (setq cx (1+ cx))
+  )
+  cells
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-build-spatial-index
+;;;  Build a spatial hash index from a list of (ent pts box key) records
+;;;  Args: records - list of (ent pts box key)
+;;;         cell-size - spatial grid cell size
+;;;  Returns: assoc list of (cell-key . (record-index ...))
+;;;---------------------------------------------------------------
+(defun dup-build-spatial-index (records cell-size / idx rec box cells cell-key i)
+  (setq idx nil)
+  (setq i 0)
+  (foreach rec records
+    (setq box (caddr rec))
+    (if box
+      (progn
+        (setq cells (dup-spatial-hash box cell-size))
+        (foreach ck cells
+          (setq cell-key (assoc ck idx))
+          (if cell-key
+            (setq idx (subst (cons ck (cons i (cdr cell-key))) cell-key idx))
+            (setq idx (cons (list ck i) idx))
+          )
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+  idx
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-get-candidates
+;;;  Get candidate record indices from spatial index for a given box
+;;;  Args: box - bounding box
+;;;         idx - spatial index
+;;;         cell-size - grid cell size
+;;;  Returns: sorted list of unique candidate indices
+;;;---------------------------------------------------------------
+(defun dup-get-candidates (box idx cell-size / cells candidates cell-records)
+  (setq cells (dup-spatial-hash box cell-size))
+  (setq candidates nil)
+  (foreach ck cells
+    (setq cell-records (assoc ck idx))
+    (if cell-records
+      (foreach ri (cdr cell-records)
+        (if (not (member ri candidates))
+          (setq candidates (cons ri candidates))
+        )
+      )
+    )
+  )
+  (vl-sort-i candidates '<)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-build-line-records
+;;;  Pre-compute endpoints, bounding boxes, and keys for all lines
+;;;  Avoids repeated entget calls during comparison
+;;;  Args: line-ss - selection set of lines
+;;;  Returns: list of (ent pts box key hash)
+;;;---------------------------------------------------------------
+(defun dup-build-line-records (line-ss / i ent pts box key hash records)
+  (setq records nil)
   (if line-ss
     (progn
       (setq i 0)
       (repeat (sslength line-ss)
-        (setq ent1 (ssname line-ss i))
-        (if (and ent1 (not (member ent1 to-remove)))
+        (setq ent (ssname line-ss i))
+        (if ent
           (progn
-            (setq j (1+ i))
-            (repeat (- (sslength line-ss) (1+ i))
-              (setq ent2 (ssname line-ss j))
-              (if (and ent2 (not (member ent2 to-remove)))
-                (if (dup-lines-identical-p ent1 ent2)
-                  (progn
-                    (setq to-remove (cons ent2 to-remove))
-                    (setq count (1+ count))
-                  )
-                )
+            (setq pts (line-get-endpoints ent))
+            (setq box (dup-box-from-pts pts))
+            (setq key (dup-line-get-key-from-pts pts))
+            (setq hash (if pts (dup-endpoint-hash pts) nil))
+            (setq records (cons (list ent pts box key hash) records))
+          )
+        )
+        (setq i (1+ i))
+      )
+      (reverse records)
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-remove-identical
+;;;  Remove identical lines using endpoint hash for O(n) lookup
+;;;  Falls back to spatial-indexed comparison for near-duplicates
+;;;  Args: line-ss - selection set
+;;;  Returns: number of duplicates removed
+;;;---------------------------------------------------------------
+(defun dup-remove-identical (line-ss / records hash-table i rec ent pts hash
+                                       existing to-remove count)
+  (setq count 0)
+  (setq to-remove nil)
+  (if line-ss
+    (progn
+      (setq records (dup-build-line-records line-ss))
+      (setq hash-table nil)
+      (setq i 0)
+      (repeat (length records)
+        (setq rec (nth i records))
+        (setq ent (car rec))
+        (setq pts (cadr rec))
+        (setq hash (nth 4 rec))
+        (if (and hash (not (member ent to-remove)))
+          (progn
+            (setq existing (assoc hash hash-table))
+            (if existing
+              (progn
+                (setq to-remove (cons ent to-remove))
+                (setq count (1+ count))
               )
-              (setq j (1+ j))
+              (setq hash-table (cons (cons hash ent) hash-table))
             )
           )
         )
         (setq i (1+ i))
       )
-      ;; Delete marked entities
       (foreach ent to-remove
         (if (entget ent) (entdel ent))
       )
@@ -223,46 +448,80 @@
 
 ;;;---------------------------------------------------------------
 ;;;  dup-merge-colinear
-;;;  Merge overlapping colinear lines
+;;;  Merge overlapping colinear lines using spatial hash grouping
+;;;  Groups lines by quantized slope/intercept, then only compares
+;;;  within groups and within spatial cells
 ;;;  Args: line-ss - selection set
 ;;;  Returns: number of merges performed
 ;;;---------------------------------------------------------------
-(defun dup-merge-colinear (line-ss / line-list i j ent1 ent2 count merged)
+(defun dup-merge-colinear (line-ss / records groups i rec key hash
+                                    group-key group-records
+                                    idx j k r1 r2 ent1 ent2
+                                    count merged new-ent)
   (setq count 0)
   (setq merged nil)
   (if line-ss
     (progn
-      ;; Convert to list for easier manipulation
-      (setq line-list nil)
+      (setq records (dup-build-line-records line-ss))
+      (setq groups nil)
       (setq i 0)
-      (repeat (sslength line-ss)
-        (setq line-list (cons (ssname line-ss i) line-list))
+      (repeat (length records)
+        (setq rec (nth i records))
+        (setq key (nth 3 rec))
+        (if key
+          (progn
+            (setq hash (dup-key-to-hash key))
+            (setq group-key (assoc hash groups))
+            (if group-key
+              (setq groups
+                (subst (cons hash (cons i (cdr group-key))) group-key groups))
+              (setq groups (cons (list hash i) groups))
+            )
+          )
+        )
         (setq i (1+ i))
       )
-      (setq line-list (reverse line-list))
-      ;; Check each pair
-      (setq i 0)
-      (while (< i (length line-list))
-        (setq ent1 (nth i line-list))
-        (if (and ent1 (entget ent1) (not (member ent1 merged)))
+      (foreach grp groups
+        (setq group-records (cdr grp))
+        (if (> (length group-records) 1)
           (progn
-            (setq j (1+ i))
-            (while (< j (length line-list))
-              (setq ent2 (nth j line-list))
-              (if (and ent2 (entget ent2) (not (member ent2 merged)))
-                (if (and (dup-lines-colinear-p ent1 ent2)
-                         (dup-lines-overlap-p ent1 ent2))
-                  (progn
-                    ;; Merge lines
-                    (setq new-ent (dup-merge-two-lines ent1 ent2))
-                    (if new-ent
+            (setq idx (dup-build-spatial-index
+                        (mapcar '(lambda (ri) (nth ri records)) group-records)
+                        *dup-cell-size*))
+            (setq j 0)
+            (while (< j (length group-records))
+              (setq r1 (nth (nth j group-records) records))
+              (setq ent1 (car r1))
+              (if (and ent1 (entget ent1) (not (member ent1 merged)))
+                (progn
+                  (setq candidates (dup-get-candidates (caddr r1) idx *dup-cell-size*))
+                  (foreach ci candidates
+                    (if (/= ci j)
                       (progn
-                        (setq merged (cons ent1 merged))
-                        (setq merged (cons ent2 merged))
-                        ;; Replace in list with new entity
-                        (setq line-list (subst new-ent ent1 line-list))
-                        (setq ent1 new-ent)
-                        (setq count (1+ count))
+                        (setq r2 (nth (nth ci group-records) records))
+                        (setq ent2 (car r2))
+                        (if (and ent2 (entget ent2) (not (member ent2 merged)))
+                          (if (and (dup-keys-colinear-p (nth 3 r1) (nth 3 r2))
+                                   (dup-boxes-overlap-p (caddr r1) (caddr r2)))
+                            (progn
+                              (setq new-ent (dup-merge-two-lines ent1 ent2))
+                              (if new-ent
+                                (progn
+                                  (setq merged (cons ent1 merged))
+                                  (setq merged (cons ent2 merged))
+                                  (setq r1
+                                    (list new-ent
+                                          (line-get-endpoints new-ent)
+                                          (dup-line-bounding-box new-ent)
+                                          (dup-line-get-key new-ent)
+                                          nil))
+                                  (setq ent1 new-ent)
+                                  (setq count (1+ count))
+                                )
+                              )
+                            )
+                          )
+                        )
                       )
                     )
                   )
@@ -272,7 +531,6 @@
             )
           )
         )
-        (setq i (1+ i))
       )
     )
   )
@@ -288,8 +546,7 @@
 ;;;---------------------------------------------------------------
 (defun dup-remove-all (line-ss layer / ss identical-count colinear-count)
   (princ "\n[dup] Removing duplicate lines...")
-  
-  ;; Get lines if not provided
+
   (if (null line-ss)
     (if layer
       (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer))))
@@ -297,7 +554,7 @@
     )
     (setq ss line-ss)
   )
-  
+
   (if (null ss)
     (progn
       (princ "\n[dup] No lines found.")
@@ -305,21 +562,18 @@
     )
     (progn
       (princ (strcat "\n[dup] Processing " (itoa (sslength ss)) " lines..."))
-      
-      ;; Step 1: Remove identical lines
+
       (setq identical-count (dup-remove-identical ss))
       (princ (strcat "\n[dup] Removed " (itoa identical-count) " identical lines."))
-      
-      ;; Refresh selection set
+
       (if layer
         (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer))))
         (setq ss (ssget "x" '((0 . "LINE"))))
       )
-      
-      ;; Step 2: Merge colinear overlapping lines
+
       (setq colinear-count (dup-merge-colinear ss))
       (princ (strcat "\n[dup] Merged " (itoa colinear-count) " colinear lines."))
-      
+
       (princ "\n[dup] Done.")
       (list identical-count colinear-count)
     )
@@ -342,6 +596,22 @@
   *dup-tolerance*
 )
 
+;;;---------------------------------------------------------------
+;;;  dup-set-cell-size
+;;;  Set the spatial hash cell size
+;;;---------------------------------------------------------------
+(defun dup-set-cell-size (val)
+  (setq *dup-cell-size* val)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-get-cell-size
+;;;  Get the current spatial hash cell size
+;;;---------------------------------------------------------------
+(defun dup-get-cell-size ()
+  *dup-cell-size*
+)
+
 ;;;===============================================================
 ;;;  TEST FUNCTIONS
 ;;;===============================================================
@@ -356,28 +626,26 @@
 
   (command-s "_.undo" "_be")
 
-  ;; Test 1: dup-line-get-key
   (princ "\n[Test 1] dup-line-get-key...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
   (setq key (dup-line-get-key ent1))
   (if (and key
-           (< (abs (- (car key) 0.0)) 0.001)    ; slope = 0
-           (< (abs (- (cadr key) 0.0)) 0.001))  ; intercept = 0
+           (< (abs (- (car key) 0.0)) 0.001)
+           (< (abs (- (cadr key) 0.0)) 0.001))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
   (command-s "_.erase" ent1 "")
 
-  ;; Test 2: dup-lines-identical-p
   (princ "\n[Test 2] dup-lines-identical-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; identical
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "1000,0" "0,0" "")  ; reversed
+  (command-s "_.line" "1000,0" "0,0" "")
   (setq ent3 (entlast))
-  (command-s "_.line" "0,0" "1000,100" "")  ; different
+  (command-s "_.line" "0,0" "1000,100" "")
   (setq ent4 (entlast))
   (if (and (dup-lines-identical-p ent1 ent2)
            (dup-lines-identical-p ent1 ent3)
@@ -390,13 +658,12 @@
   (command-s "_.erase" ent3 "")
   (command-s "_.erase" ent4 "")
 
-  ;; Test 3: dup-lines-colinear-p
   (princ "\n[Test 3] dup-lines-colinear-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; colinear
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "0,0" "1000,100" "")  ; not colinear
+  (command-s "_.line" "0,0" "1000,100" "")
   (setq ent3 (entlast))
   (if (and (dup-lines-colinear-p ent1 ent2)
            (null (dup-lines-colinear-p ent1 ent3)))
@@ -407,13 +674,12 @@
   (command-s "_.erase" ent2 "")
   (command-s "_.erase" ent3 "")
 
-  ;; Test 4: dup-lines-overlap-p
   (princ "\n[Test 4] dup-lines-overlap-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlaps
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "1100,0" "2000,0" "")  ; does not overlap
+  (command-s "_.line" "1100,0" "2000,0" "")
   (setq ent3 (entlast))
   (if (and (dup-lines-overlap-p ent1 ent2)
            (null (dup-lines-overlap-p ent1 ent3)))
@@ -424,37 +690,33 @@
   (command-s "_.erase" ent2 "")
   (command-s "_.erase" ent3 "")
 
-  ;; Test 5: dup-remove-identical
   (princ "\n[Test 5] dup-remove-identical...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; duplicate
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; another duplicate
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent3 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq ss (ssadd ent3 ss))
   (setq count (dup-remove-identical ss))
-  (if (= count 2)  ; should remove 2 duplicates
+  (if (= count 2)
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup remaining line
   (if (entget ent1) (command-s "_.erase" ent1 ""))
 
-  ;; Test 6: dup-merge-colinear
   (princ "\n[Test 6] dup-merge-colinear...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlaps
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq count (dup-merge-colinear ss))
-  ;; After merge, should have 1 line spanning 0-1500
   (setq remaining-ss (ssget "x" '((0 . "LINE"))))
   (if (and (= count 1)
            remaining-ss
@@ -465,40 +727,65 @@
   )
   (if remaining-ss (command-s "_.erase" (ssname remaining-ss 0) ""))
 
-  ;; Test 7: dup-remove-all (integration)
-  (princ "\n[Test 7] dup-remove-all...")
+  (princ "\n[Test 7] dup-remove-all (integration)...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; identical
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlapping
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent3 (entlast))
   (setq result (dup-remove-all nil "0"))
-  (if (and (= (car result) 1)  ; 1 identical removed
-           (= (cadr result) 1)) ; 1 merge performed
+  (if (and (= (car result) 1)
+           (= (cadr result) 1))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (setq ss (ssget "x" '((0 . "LINE"))))
   (if ss (command-s "_.erase" ss ""))
 
-  ;; Test 8: tolerance get/set
   (princ "\n[Test 8] tolerance get/set...")
   (setq old-tol (dup-get-tolerance))
   (dup-set-tolerance 5.0)
   (if (= (dup-get-tolerance) 5.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (dup-set-tolerance old-tol)
     )
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
+  (princ "\n[Test 9] dup-endpoint-hash...")
+  (setq h1 (dup-endpoint-hash (list (list 0.0 0.0 0.0) (list 1000.0 0.0 0.0))))
+  (setq h2 (dup-endpoint-hash (list (list 1000.0 0.0 0.0) (list 0.0 0.0 0.0))))
+  (if (= h1 h2)
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 10] dup-key-to-hash...")
+  (setq k1 (dup-key-to-hash (list 0.0 0.0 0.0 0.0)))
+  (setq k2 (dup-key-to-hash (list 0.0 0.5 0.0 0.0)))
+  (if (and (= k1 k2)
+           (stringp k1))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 11] spatial hash cell size get/set...")
+  (setq old-cs (dup-get-cell-size))
+  (dup-set-cell-size 10000.0)
+  (if (= (dup-get-cell-size) 10000.0)
+    (progn
+      (princ " PASS")
+      (setq passed (1+ passed))
+      (dup-set-cell-size old-cs)
+    )
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
   (command-s "_.undo" "_e")
 
-  ;; Summary
   (princ (strcat "\n\n=== M04 Test Summary: "
                  (itoa passed) " passed, "
                  (itoa failed) " failed ===\n"))
@@ -514,5 +801,6 @@
 (princ (strcat "  Functions: dup-remove-identical, dup-merge-colinear, "
                "dup-remove-all, dup-lines-identical-p"))
 (princ (strcat "\n  Default tolerance: " (rtos *dup-tolerance* 2 2)))
+(princ (strcat "\n  Spatial cell size: " (rtos *dup-cell-size* 2 0)))
 (princ "\n  Test: (test-M04-duplicate-remover)")
 (princ)
