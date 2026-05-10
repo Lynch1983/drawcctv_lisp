@@ -408,8 +408,8 @@
 ;;;  Build graph from processed lines
 ;;;---------------------------------------------------------------
 (defun main-build-graph (/ ss gllst build-result)
-  (princ "\n[main] Building graph...")
-  (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
+  (princ "\n[main] Building graph from cable tray lines only...")
+  (setq gllst (list (cons 0 "LINE") (cons 8 *main-temp-layer*)))
   (setq ss (ssget "x" gllst))
   (if (and ss (> (sslength ss) 0))
     (progn
@@ -743,6 +743,7 @@
                               workflow-ok draw-pts i ent
                               base-pt proj-pt proj-dist nearest-line nearest-ent
                               dev-name blk-name plan-result plan-method
+                              entry-node pipe-dist
                               tmp-dis end-dis best-jnx best-name
                               graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
@@ -842,10 +843,6 @@
 
                     (if plan-result
                       (progn
-                        (setq proj-pt (car plan-result))
-                        (setq proj-dist (cadr plan-result))
-                        (setq nearest-ent (caddr plan-result))
-
                         (setq end-dis 1000000.0)
                         (setq best-jnx nil)
                         (setq best-name nil)
@@ -860,7 +857,22 @@
                           (setq jnx-node (graph-get-node-index tmp-jnx-pt))
                           (if jnx-node
                             (progn
-                              (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                              (if (= plan-method "A")
+                                (progn
+                                  (setq proj-pt (car plan-result))
+                                  (setq proj-dist (cadr plan-result))
+                                  (setq nearest-ent (caddr plan-result))
+                                  (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                                )
+                                (progn
+                                  (setq entry-node (cadr plan-result))
+                                  (setq pipe-dist (caddr plan-result))
+                                  (setq graph-dist (graph-get-distance entry-node jnx-node))
+                                  (if graph-dist
+                                    (setq graph-dist (+ pipe-dist graph-dist))
+                                  )
+                                )
+                              )
                               (if graph-dist
                                 (progn
                                   (setq use-bias

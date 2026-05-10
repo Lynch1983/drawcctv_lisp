@@ -4518,20 +4518,74 @@
 
 ;;;---------------------------------------------------------------
 ;;;  device-connect-plan-b
-;;;  Plan B: Project device point to pipe layer, route via pipe
-;;;          to cable tray network
+;;;  Plan B: Project device point to pipe layer, then find
+;;;          the pipe-to-tray connection point as graph entry.
+;;;          Pipe lines are NOT part of the Floyd graph.
+;;;          They serve only as geometric bridges.
 ;;;  Args: base-pt     - device base point
 ;;;         pipe-layer  - pipe layer name
-;;;  Returns: (proj-pt proj-dist nearest-ent) or nil
+;;;  Returns: (entry-pt entry-node pipe-dist nearest-ent) or nil
+;;;           entry-pt   - cable tray entry point (pipe endpoint on tray)
+;;;           entry-node - graph node index of entry point
+;;;           pipe-dist  - distance from cam to pipe proj + pipe proj to entry
+;;;           nearest-ent - the pipe LINE entity
 ;;;---------------------------------------------------------------
-(defun device-connect-plan-b (base-pt pipe-layer / result)
+(defun device-connect-plan-b (base-pt pipe-layer /
+                                       pipe-result pipe-ent pipe-proj-pt pipe-proj-dist
+                                       endpts ep1 ep2 ep1-node ep2-node
+                                       d1 d2 best-entry best-node best-dist)
   (if (null pipe-layer)
     nil
     (progn
-      (setq result (device-find-nearest-on-layer base-pt pipe-layer))
-      (if result
-        (list (cadr result) (caddr result) (car result))
+      (setq pipe-result (device-find-nearest-on-layer base-pt pipe-layer))
+      (if (null pipe-result)
         nil
+        (progn
+          (setq pipe-ent (car pipe-result))
+          (setq pipe-proj-pt (cadr pipe-result))
+          (setq pipe-proj-dist (caddr pipe-result))
+          (setq endpts (line-get-endpoints pipe-ent))
+          (if (null endpts)
+            nil
+            (progn
+              (setq ep1 (car endpts))
+              (setq ep2 (cadr endpts))
+              (setq ep1-node (graph-get-node-index ep1))
+              (setq ep2-node (graph-get-node-index ep2))
+              (setq best-entry nil)
+              (setq best-node nil)
+              (setq best-dist 1e30)
+              (if ep1-node
+                (progn
+                  (setq d1 (+ pipe-proj-dist (distance pipe-proj-pt ep1)))
+                  (if (< d1 best-dist)
+                    (progn
+                      (setq best-dist d1)
+                      (setq best-entry ep1)
+                      (setq best-node ep1-node)
+                    )
+                  )
+                )
+              )
+              (if ep2-node
+                (progn
+                  (setq d2 (+ pipe-proj-dist (distance pipe-proj-pt ep2)))
+                  (if (< d2 best-dist)
+                    (progn
+                      (setq best-dist d2)
+                      (setq best-entry ep2)
+                      (setq best-node ep2-node)
+                    )
+                  )
+                )
+              )
+              (if best-entry
+                (list best-entry best-node best-dist pipe-ent)
+                nil
+              )
+            )
+          )
+        )
       )
     )
   )
@@ -6917,8 +6971,8 @@
 ;;;  Build graph from processed lines
 ;;;---------------------------------------------------------------
 (defun main-build-graph (/ ss gllst build-result)
-  (princ "\n[main] Building graph...")
-  (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
+  (princ "\n[main] Building graph from cable tray lines only...")
+  (setq gllst (list (cons 0 "LINE") (cons 8 *main-temp-layer*)))
   (setq ss (ssget "x" gllst))
   (if (and ss (> (sslength ss) 0))
     (progn
@@ -7250,7 +7304,7 @@
                               gjx-list gjx-name-list connections
                               workflow-ok draw-pts i ent
                               base-pt proj-pt proj-dist nearest-line nearest-ent
-                              dev-name blk-name plan-result plan-method
+                              dev-name blk-name plan-result plan-method entry-node pipe-dist
                               tmp-dis end-dis best-jnx best-name
                               graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
@@ -7347,10 +7401,6 @@
                     )
                     (if plan-result
                       (progn
-                        (setq proj-pt (car plan-result))
-                        (setq proj-dist (cadr plan-result))
-                        (setq nearest-ent (caddr plan-result))
-
                         (setq end-dis 1000000.0)
                         (setq best-jnx nil)
                         (setq best-name nil)
@@ -7365,7 +7415,22 @@
                           (setq jnx-node (graph-get-node-index tmp-jnx-pt))
                           (if jnx-node
                             (progn
-                              (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                              (if (= plan-method "A")
+                                (progn
+                                  (setq proj-pt (car plan-result))
+                                  (setq proj-dist (cadr plan-result))
+                                  (setq nearest-ent (caddr plan-result))
+                                  (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                                )
+                                (progn
+                                  (setq entry-node (cadr plan-result))
+                                  (setq pipe-dist (caddr plan-result))
+                                  (setq graph-dist (graph-get-distance entry-node jnx-node))
+                                  (if graph-dist
+                                    (setq graph-dist (+ pipe-dist graph-dist))
+                                  )
+                                )
+                              )
                               (if graph-dist
                                 (progn
                                   (setq use-bias

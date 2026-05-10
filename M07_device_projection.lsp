@@ -282,20 +282,74 @@
 
 ;;;---------------------------------------------------------------
 ;;;  device-connect-plan-b
-;;;  Plan B: Project device point to pipe layer, route via pipe
-;;;          to cable tray network
+;;;  Plan B: Project device point to pipe layer, then find
+;;;          the pipe-to-tray connection point as graph entry.
+;;;          Pipe lines are NOT part of the Floyd graph.
+;;;          They serve only as geometric bridges.
 ;;;  Args: base-pt     - device base point
 ;;;         pipe-layer  - pipe layer name
-;;;  Returns: (proj-pt proj-dist nearest-ent) or nil
+;;;  Returns: (entry-pt entry-node pipe-dist nearest-ent) or nil
+;;;           entry-pt   - cable tray entry point (pipe endpoint on tray)
+;;;           entry-node - graph node index of entry point
+;;;           pipe-dist  - distance from cam to pipe proj + pipe proj to entry
+;;;           nearest-ent - the pipe LINE entity
 ;;;---------------------------------------------------------------
-(defun device-connect-plan-b (base-pt pipe-layer / result)
+(defun device-connect-plan-b (base-pt pipe-layer /
+                                       pipe-result pipe-ent pipe-proj-pt pipe-proj-dist
+                                       endpts ep1 ep2 ep1-node ep2-node
+                                       d1 d2 best-entry best-node best-dist)
   (if (null pipe-layer)
     nil
     (progn
-      (setq result (device-find-nearest-on-layer base-pt pipe-layer))
-      (if result
-        (list (cadr result) (caddr result) (car result))
+      (setq pipe-result (device-find-nearest-on-layer base-pt pipe-layer))
+      (if (null pipe-result)
         nil
+        (progn
+          (setq pipe-ent (car pipe-result))
+          (setq pipe-proj-pt (cadr pipe-result))
+          (setq pipe-proj-dist (caddr pipe-result))
+          (setq endpts (line-get-endpoints pipe-ent))
+          (if (null endpts)
+            nil
+            (progn
+              (setq ep1 (car endpts))
+              (setq ep2 (cadr endpts))
+              (setq ep1-node (graph-get-node-index ep1))
+              (setq ep2-node (graph-get-node-index ep2))
+              (setq best-entry nil)
+              (setq best-node nil)
+              (setq best-dist 1e30)
+              (if ep1-node
+                (progn
+                  (setq d1 (+ pipe-proj-dist (distance pipe-proj-pt ep1)))
+                  (if (< d1 best-dist)
+                    (progn
+                      (setq best-dist d1)
+                      (setq best-entry ep1)
+                      (setq best-node ep1-node)
+                    )
+                  )
+                )
+              )
+              (if ep2-node
+                (progn
+                  (setq d2 (+ pipe-proj-dist (distance pipe-proj-pt ep2)))
+                  (if (< d2 best-dist)
+                    (progn
+                      (setq best-dist d2)
+                      (setq best-entry ep2)
+                      (setq best-node ep2-node)
+                    )
+                  )
+                )
+              )
+              (if best-entry
+                (list best-entry best-node best-dist pipe-ent)
+                nil
+              )
+            )
+          )
+        )
       )
     )
   )
