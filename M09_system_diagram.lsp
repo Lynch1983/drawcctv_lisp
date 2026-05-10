@@ -57,49 +57,20 @@
 ;;;  Returns: list of groups, each group is a list of items
 ;;;           ((group1-item1 group1-item2 ...) (group2-item1 ...) ...)
 ;;;---------------------------------------------------------------
-(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx catch-result)
+(defun sysdiag-classify-by-junction (lst / groups jnx-name entry)
   (if (null lst)
     nil
     (progn
-      (setq i 0)
-      (setq end nil)
-      (setq end-drawlist lst)
-      (while end-drawlist
-        (setq tmp-lst (list (car end-drawlist)))
-        (setq catch-result
-          (vl-catch-all-apply
-            '(lambda ()
-              (nth 3 (car tmp-lst))
-            )
-          )
+      (setq groups nil)
+      (foreach item lst
+        (setq jnx-name (nth 3 item))
+        (setq entry (assoc jnx-name groups))
+        (if entry
+          (setq groups (subst (cons jnx-name (cons item (cdr entry))) entry groups))
+          (setq groups (cons (list jnx-name item) groups))
         )
-        (if (vl-catch-all-error-p catch-result)
-          (setq tmp-gjx nil)
-          (setq tmp-gjx catch-result)
-        )
-        (setq end-drawlist (cdr end-drawlist))
-        (setq i 0)
-        (repeat (length end-drawlist)
-          (setq catch-result
-            (vl-catch-all-apply
-              '(lambda ()
-                (nth 3 (nth i end-drawlist))
-              )
-            )
-          )
-          (if (and (not (vl-catch-all-error-p catch-result))
-                   (= catch-result tmp-gjx))
-            (progn
-              (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
-              (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
-            )
-            (setq i (1+ i))
-          )
-        )
-        (setq end (append (list tmp-lst) end))
-        (setq i 0)
       )
-      end
+      (mapcar 'cdr groups)
     )
   )
 )

@@ -122,13 +122,13 @@
 ;;;         tol - tolerance (nil = 0.0)
 ;;;  Returns: T or nil
 ;;;---------------------------------------------------------------
-(defun sp-boxes-overlap-p (box1 box2 tol / t)
-  (if (null tol) (setq tol 0.0))
+(defun sp-boxes-overlap-p (box1 box2 tol-val / )
+  (if (null tol-val) (setq tol-val 0.0))
   (if (and box1 box2)
-    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))
-             (< (nth 2 box2) (- (nth 0 box1) tol))
-             (< (nth 3 box1) (- (nth 1 box2) tol))
-             (< (nth 3 box2) (- (nth 1 box1) tol))))
+    (not (or (< (nth 2 box1) (- (nth 0 box2) tol-val))
+             (< (nth 2 box2) (- (nth 0 box1) tol-val))
+             (< (nth 3 box1) (- (nth 1 box2) tol-val))
+             (< (nth 3 box2) (- (nth 1 box1) tol-val))))
     nil
   )
 )

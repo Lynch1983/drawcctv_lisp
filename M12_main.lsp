@@ -204,13 +204,15 @@
     (progn
       (setq err-result (vl-catch-all-apply
         '(lambda ()
-          (setq i 0)
           (setq clean-ss (ssget "x" (list (cons 8 layer-name))))
           (if clean-ss
-            (repeat (sslength clean-ss)
-              (setq tmp (ssname clean-ss i))
-              (command-s "_.erase" tmp "")
-              (setq i (1+ i))
+            (progn
+              (setq i 0)
+              (repeat (sslength clean-ss)
+                (setq tmp (ssname clean-ss i))
+                (if (and tmp (entget tmp)) (entdel tmp))
+                (setq i (1+ i))
+              )
             )
           )
           T
@@ -435,7 +437,7 @@
             (setq base-pt (block-get-base-point ent))
             (if base-pt
               (progn
-                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (setq proj-info (device-find-nearest-line base-pt nil nil))
                 (if proj-info
                   (progn
                     (setq proj-pt (cadr proj-info))
@@ -487,7 +489,7 @@
           (setq y 0)
           (repeat (length room-pts)
             (setq tmp-pt (nth y room-pts))
-            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (setq proj-info (device-find-nearest-line tmp-pt nil nil))
             (if proj-info
               (progn
                 (setq proj-pt (cadr proj-info))
@@ -516,7 +518,7 @@
             (setq base-pt (block-get-base-point ent))
             (if base-pt
               (progn
-                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (setq proj-info (device-find-nearest-line base-pt nil nil))
                 (if proj-info
                   (progn
                     (setq proj-pt (cadr proj-info))
@@ -568,7 +570,7 @@
           (setq y 0)
           (repeat (length room-pts)
             (setq tmp-pt (nth y room-pts))
-            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (setq proj-info (device-find-nearest-line tmp-pt nil nil))
             (if proj-info
               (progn
                 (setq proj-pt (cadr proj-info))
@@ -604,9 +606,9 @@
 ;;;  Branch 1: No room + has junctions
 ;;;  Branch 2: Has room + has junctions
 ;;;  Branch 3: Has room + no junctions
-;;;  NOTE: device-project-to-graph adds ephemeral graph nodes that will be
-;;;        cleared by graph-build-from-lines. The persistent artifacts are
-;;;        the projection LINE entities drawn on *main-temp-layer*.
+;;;  NOTE: device-find-nearest-line returns (entity proj-pt proj-dist).
+;;;        The persistent artifacts are the projection LINE entities
+;;;        drawn on *main-temp-layer* via entmakex.
 ;;;  Returns: (gjx_list gjx_name_list) where gjx_list = ((pt . dist) ...)
 ;;;---------------------------------------------------------------
 (defun main-process-room-points (junction-ss room-pts / gjx-list gjx-name-list

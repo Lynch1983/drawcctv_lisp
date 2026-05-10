@@ -131,13 +131,13 @@
 ;;;         tol - tolerance (nil = 0.0)
 ;;;  Returns: T or nil
 ;;;---------------------------------------------------------------
-(defun sp-boxes-overlap-p (box1 box2 tol / t)
-  (if (null tol) (setq tol 0.0))
+(defun sp-boxes-overlap-p (box1 box2 tol-val / )
+  (if (null tol-val) (setq tol-val 0.0))
   (if (and box1 box2)
-    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))
-             (< (nth 2 box2) (- (nth 0 box1) tol))
-             (< (nth 3 box1) (- (nth 1 box2) tol))
-             (< (nth 3 box2) (- (nth 1 box1) tol))))
+    (not (or (< (nth 2 box1) (- (nth 0 box2) tol-val))
+             (< (nth 2 box2) (- (nth 0 box1) tol-val))
+             (< (nth 3 box1) (- (nth 1 box2) tol-val))
+             (< (nth 3 box2) (- (nth 1 box1) tol-val))))
     nil
   )
 )
@@ -762,28 +762,29 @@
 ;;;  graph-update-matrix (internal)
 ;;;  Update a single cell in the distance matrix
 ;;;---------------------------------------------------------------
-(defun graph-update-matrix (row col val / i j result row-data)
-  (setq result nil)
+(defun graph-update-matrix (row col val / i new-row)
+  (setq new-row nil)
   (setq i 0)
-  (foreach r *graph-dist*
-    (if (= i row)
-      (progn
-        (setq row-data nil)
-        (setq j 0)
-        (foreach c r
-          (if (= j col)
-            (setq row-data (cons val row-data))
-            (setq row-data (cons c row-data))
-          )
-          (setq j (1+ j))
-        )
-        (setq result (cons (reverse row-data) result))
-      )
-      (setq result (cons r result))
+  (foreach c (nth row *graph-dist*)
+    (if (= i col)
+      (setq new-row (cons val new-row))
+      (setq new-row (cons c new-row))
     )
     (setq i (1+ i))
   )
-  (setq *graph-dist* (reverse result))
+  (setq new-row (reverse new-row))
+  (setq i 0)
+  (setq *graph-dist*
+    (mapcar
+      '(lambda (r)
+        (if (= i row)
+          (progn (setq i (1+ i)) new-row)
+          (progn (setq i (1+ i)) r)
+        )
+      )
+      *graph-dist*
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -792,7 +793,7 @@
 ;;;  Args: nodeA, nodeB - integer node indices
 ;;;  Returns: float distance or nil if unreachable
 ;;;---------------------------------------------------------------
-(defun graph-get-distance (nodeA nodeB / row)
+(defun graph-get-distance (nodeA nodeB / row d)
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph] Error: Floyd-Warshall not computed.") nil)
     (if (null *graph-dist*)
@@ -3590,6 +3591,7 @@
 ;;;---------------------------------------------------------------
 ;;;  *block-name-search-radius* - Radius for searching text near block
 (setq *block-name-search-radius* 3000.0)
+(setq *block-base-point-cache* nil)
 
 ;;;---------------------------------------------------------------
 ;;;  block-get-insertion-point
@@ -3835,21 +3837,29 @@
 ;;;  Args: ent - entity name (block reference)
 ;;;  Returns: point list or nil
 ;;;---------------------------------------------------------------
-(defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation)
+(defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation cache-key cached)
   (setq block-name (block-get-name ent))
   (if (null block-name)
     nil
     (progn
-      (setq largest-ent (block-find-largest-entity block-name))
-      (if largest-ent
+      (setq scale (block-get-scale ent))
+      (setq rotation (block-get-rotation ent))
+      (setq cache-key (strcat block-name "|"
+                        (rtos (car scale) 2 4) ","
+                        (rtos (cadr scale) 2 4) ","
+                        (rtos rotation 2 6)))
+      (setq cached (assoc cache-key *block-base-point-cache*))
+      (if cached
+        (block-transform-point (cdr cached) (block-get-insertion-point ent) scale rotation)
         (progn
-          (setq center (block-entity-get-center largest-ent))
-          (setq insertion (block-get-insertion-point ent))
-          (setq scale (block-get-scale ent))
-          (setq rotation (block-get-rotation ent))
-          (block-transform-point center insertion scale rotation)
+          (setq largest-ent (block-find-largest-entity block-name))
+          (setq center (if largest-ent
+                         (block-entity-get-center largest-ent)
+                         (list 0.0 0.0 0.0)))
+          (setq *block-base-point-cache*
+            (cons (cons cache-key center) *block-base-point-cache*))
+          (block-transform-point center (block-get-insertion-point ent) scale rotation)
         )
-        (block-get-insertion-point ent)
       )
     )
   )
@@ -3864,7 +3874,7 @@
 ;;;         rotation  - rotation angle in radians
 ;;;  Returns: transformed point
 ;;;---------------------------------------------------------------
-(defun block-transform-point (pt insertion scale rotation / x y sx sy)
+(defun block-transform-point (pt insertion scale rotation / x y sx sy cos-r sin-r x-new y-new)
   (setq x (car pt))
   (setq y (cadr pt))
   (setq sx (car scale))
@@ -4967,49 +4977,20 @@
 ;;;  Returns: list of groups, each group is a list of items
 ;;;           ((group1-item1 group1-item2 ...) (group2-item1 ...) ...)
 ;;;---------------------------------------------------------------
-(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx catch-result)
+(defun sysdiag-classify-by-junction (lst / groups jnx-name entry)
   (if (null lst)
     nil
     (progn
-      (setq i 0)
-      (setq end nil)
-      (setq end-drawlist lst)
-      (while end-drawlist
-        (setq tmp-lst (list (car end-drawlist)))
-        (setq catch-result
-          (vl-catch-all-apply
-            '(lambda ()
-              (nth 3 (car tmp-lst))
-            )
-          )
+      (setq groups nil)
+      (foreach item lst
+        (setq jnx-name (nth 3 item))
+        (setq entry (assoc jnx-name groups))
+        (if entry
+          (setq groups (subst (cons jnx-name (cons item (cdr entry))) entry groups))
+          (setq groups (cons (list jnx-name item) groups))
         )
-        (if (vl-catch-all-error-p catch-result)
-          (setq tmp-gjx nil)
-          (setq tmp-gjx catch-result)
-        )
-        (setq end-drawlist (cdr end-drawlist))
-        (setq i 0)
-        (repeat (length end-drawlist)
-          (setq catch-result
-            (vl-catch-all-apply
-              '(lambda ()
-                (nth 3 (nth i end-drawlist))
-              )
-            )
-          )
-          (if (and (not (vl-catch-all-error-p catch-result))
-                   (= catch-result tmp-gjx))
-            (progn
-              (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
-              (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
-            )
-            (setq i (1+ i))
-          )
-        )
-        (setq end (append (list tmp-lst) end))
-        (setq i 0)
       )
-      end
+      (mapcar 'cdr groups)
     )
   )
 )
@@ -6639,13 +6620,15 @@
     (progn
       (setq err-result (vl-catch-all-apply
         '(lambda ()
-          (setq i 0)
           (setq clean-ss (ssget "x" (list (cons 8 layer-name))))
           (if clean-ss
-            (repeat (sslength clean-ss)
-              (setq tmp (ssname clean-ss i))
-              (command-s "_.erase" tmp "")
-              (setq i (1+ i))
+            (progn
+              (setq i 0)
+              (repeat (sslength clean-ss)
+                (setq tmp (ssname clean-ss i))
+                (if (and tmp (entget tmp)) (entdel tmp))
+                (setq i (1+ i))
+              )
             )
           )
           T
@@ -6870,7 +6853,7 @@
             (setq base-pt (block-get-base-point ent))
             (if base-pt
               (progn
-                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (setq proj-info (device-find-nearest-line base-pt nil nil))
                 (if proj-info
                   (progn
                     (setq proj-pt (cadr proj-info))
@@ -6922,7 +6905,7 @@
           (setq y 0)
           (repeat (length room-pts)
             (setq tmp-pt (nth y room-pts))
-            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (setq proj-info (device-find-nearest-line tmp-pt nil nil))
             (if proj-info
               (progn
                 (setq proj-pt (cadr proj-info))
@@ -6951,7 +6934,7 @@
             (setq base-pt (block-get-base-point ent))
             (if base-pt
               (progn
-                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (setq proj-info (device-find-nearest-line base-pt nil nil))
                 (if proj-info
                   (progn
                     (setq proj-pt (cadr proj-info))
@@ -7003,7 +6986,7 @@
           (setq y 0)
           (repeat (length room-pts)
             (setq tmp-pt (nth y room-pts))
-            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (setq proj-info (device-find-nearest-line tmp-pt nil nil))
             (if proj-info
               (progn
                 (setq proj-pt (cadr proj-info))
@@ -7039,9 +7022,8 @@
 ;;;  Branch 1: No room + has junctions
 ;;;  Branch 2: Has room + has junctions
 ;;;  Branch 3: Has room + no junctions
-;;;  NOTE: device-project-to-graph adds ephemeral graph nodes that will be
-;;;        cleared by graph-build-from-lines. The persistent artifacts are
-;;;        the projection LINE entities drawn on *main-temp-layer*.
+;;;  NOTE: device-find-nearest-line returns (entity proj-pt proj-dist). The persistent
+;;;        artifacts are the projection LINE entities drawn on *main-temp-layer* via entmakex.
 ;;;  Returns: (gjx_list gjx_name_list) where gjx_list = ((pt . dist) ...)
 ;;;---------------------------------------------------------------
 (defun main-process-room-points (junction-ss room-pts / gjx-list gjx-name-list

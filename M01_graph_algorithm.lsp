@@ -415,28 +415,29 @@
 ;;;  graph-update-matrix (internal)
 ;;;  Update a single cell in the distance matrix
 ;;;---------------------------------------------------------------
-(defun graph-update-matrix (row col val / i j result row-data)
-  (setq result nil)
+(defun graph-update-matrix (row col val / i new-row)
+  (setq new-row nil)
   (setq i 0)
-  (foreach r *graph-dist*
-    (if (= i row)
-      (progn
-        (setq row-data nil)
-        (setq j 0)
-        (foreach c r
-          (if (= j col)
-            (setq row-data (cons val row-data))
-            (setq row-data (cons c row-data))
-          )
-          (setq j (1+ j))
-        )
-        (setq result (cons (reverse row-data) result))
-      )
-      (setq result (cons r result))
+  (foreach c (nth row *graph-dist*)
+    (if (= i col)
+      (setq new-row (cons val new-row))
+      (setq new-row (cons c new-row))
     )
     (setq i (1+ i))
   )
-  (setq *graph-dist* (reverse result))
+  (setq new-row (reverse new-row))
+  (setq i 0)
+  (setq *graph-dist*
+    (mapcar
+      '(lambda (r)
+        (if (= i row)
+          (progn (setq i (1+ i)) new-row)
+          (progn (setq i (1+ i)) r)
+        )
+      )
+      *graph-dist*
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -445,7 +446,7 @@
 ;;;  Args: nodeA, nodeB - integer node indices
 ;;;  Returns: float distance or nil if unreachable
 ;;;---------------------------------------------------------------
-(defun graph-get-distance (nodeA nodeB / row)
+(defun graph-get-distance (nodeA nodeB / row d)
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph] Error: Floyd-Warshall not computed.") nil)
     (if (null *graph-dist*)

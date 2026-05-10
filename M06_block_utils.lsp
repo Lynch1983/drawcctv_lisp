@@ -11,6 +11,7 @@
 ;;;---------------------------------------------------------------
 ;;;  *block-name-search-radius* - Radius for searching text near block
 (setq *block-name-search-radius* 3000.0)
+(setq *block-base-point-cache* nil)
 
 ;;;---------------------------------------------------------------
 ;;;  block-get-insertion-point
@@ -256,21 +257,29 @@
 ;;;  Args: ent - entity name (block reference)
 ;;;  Returns: point list or nil
 ;;;---------------------------------------------------------------
-(defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation)
+(defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation cache-key cached)
   (setq block-name (block-get-name ent))
   (if (null block-name)
     nil
     (progn
-      (setq largest-ent (block-find-largest-entity block-name))
-      (if largest-ent
+      (setq scale (block-get-scale ent))
+      (setq rotation (block-get-rotation ent))
+      (setq cache-key (strcat block-name "|"
+                        (rtos (car scale) 2 4) ","
+                        (rtos (cadr scale) 2 4) ","
+                        (rtos rotation 2 6)))
+      (setq cached (assoc cache-key *block-base-point-cache*))
+      (if cached
+        (block-transform-point (cdr cached) (block-get-insertion-point ent) scale rotation)
         (progn
-          (setq center (block-entity-get-center largest-ent))
-          (setq insertion (block-get-insertion-point ent))
-          (setq scale (block-get-scale ent))
-          (setq rotation (block-get-rotation ent))
-          (block-transform-point center insertion scale rotation)
+          (setq largest-ent (block-find-largest-entity block-name))
+          (setq center (if largest-ent
+                         (block-entity-get-center largest-ent)
+                         (list 0.0 0.0 0.0)))
+          (setq *block-base-point-cache*
+            (cons (cons cache-key center) *block-base-point-cache*))
+          (block-transform-point center (block-get-insertion-point ent) scale rotation)
         )
-        (block-get-insertion-point ent)
       )
     )
   )
@@ -285,7 +294,7 @@
 ;;;         rotation  - rotation angle in radians
 ;;;  Returns: transformed point
 ;;;---------------------------------------------------------------
-(defun block-transform-point (pt insertion scale rotation / x y sx sy)
+(defun block-transform-point (pt insertion scale rotation / x y sx sy cos-r sin-r x-new y-new)
   (setq x (car pt))
   (setq y (cadr pt))
   (setq sx (car scale))
