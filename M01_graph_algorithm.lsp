@@ -484,6 +484,66 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  graph-distance-via-edge
+;;;  Compute distance from a projection point to a target node
+;;;  via the two endpoints of the edge the projection lies on.
+;;;  This avoids needing to add the projection point as a new node
+;;;  and re-run Floyd-Warshall.
+;;;
+;;;  Formula: dist = proj_dist + min(
+;;;    graph_dist(ep1_node, target_node) + dist(proj_pt, ep1_pt),
+;;;    graph_dist(ep2_node, target_node) + dist(proj_pt, ep2_pt)
+;;;  )
+;;;
+;;;  Args: proj-pt   - projection point on the edge
+;;;         proj-dist - distance from original point to proj-pt
+;;;         edge-ent  - the LINE entity the projection lies on
+;;;         target-node - integer node index of the target
+;;;  Returns: float total distance or nil
+;;;---------------------------------------------------------------
+(defun graph-distance-via-edge (proj-pt proj-dist edge-ent target-node /
+                                 endpts ep1 ep2 ep1-node ep2-node
+                                 d1 d2 dist-via-ep1 dist-via-ep2)
+  (if (null edge-ent)
+    nil
+    (progn
+      (setq endpts (line-get-endpoints edge-ent))
+      (if (null endpts)
+        nil
+        (progn
+          (setq ep1 (car endpts))
+          (setq ep2 (cadr endpts))
+          (setq ep1-node (graph-get-node-index ep1))
+          (setq ep2-node (graph-get-node-index ep2))
+          (if (or (null ep1-node) (null ep2-node))
+            nil
+            (progn
+              (setq d1 (graph-get-distance ep1-node target-node))
+              (setq d2 (graph-get-distance ep2-node target-node))
+              (setq dist-via-ep1 nil)
+              (setq dist-via-ep2 nil)
+              (if (and d1 (< d1 1e29))
+                (setq dist-via-ep1 (+ proj-dist (distance proj-pt ep1) d1))
+              )
+              (if (and d2 (< d2 1e29))
+                (setq dist-via-ep2 (+ proj-dist (distance proj-pt ep2) d2))
+              )
+              (cond
+                ((and dist-via-ep1 dist-via-ep2)
+                 (min dist-via-ep1 dist-via-ep2))
+                (dist-via-ep1 dist-via-ep1)
+                (dist-via-ep2 dist-via-ep2)
+                (T nil)
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
 ;;;  graph-find-nearest-edge
 ;;;  Find the nearest graph edge to a given point
 ;;;  Args: pt    - point list

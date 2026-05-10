@@ -17,7 +17,6 @@
 (setq *main-cable-tray-layer* nil)
 (setq *main-pipe-layer* nil)
 (setq *main-room-points* nil)
-(setq *main-equiv-points* nil)
 (setq *main-cable-coefficient* 1.2)
 (setq *main-junction-bias* 10000.0)
 (setq *main-room-bias* 25000.0)
@@ -713,9 +712,10 @@
 (defun main-run-workflow (/ cameras junctions junction-ss room-result
                               gjx-list gjx-name-list connections
                               workflow-ok draw-pts i ent
-                              base-pt proj-pt proj-dist proj-info dev-name blk-name
+                              base-pt proj-pt proj-dist nearest-line nearest-ent
+                              dev-name blk-name
                               tmp-dis end-dis best-jnx best-name
-                              dev-node graph-dist tmp-jnx tmp-jnx-pt
+                              graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
                               end-drawlist m_n main-workflow-error)
   (princ "\n\n=== CCTV System Workflow ===")
@@ -799,11 +799,12 @@
                     (setq dev-name (block-get-name-from-text ent nil))
                     (if (null dev-name) (setq dev-name "CAM"))
 
-                    (setq proj-info (device-project-to-graph base-pt nil nil))
-                    (if proj-info
+                    (setq nearest-line (device-find-nearest-line base-pt nil nil))
+                    (if nearest-line
                       (progn
-                        (setq proj-pt (cadr proj-info))
-                        (setq proj-dist (caddr proj-info))
+                        (setq proj-pt (cadr nearest-line))
+                        (setq proj-dist (caddr nearest-line))
+                        (setq nearest-ent (car nearest-line))
 
                         (setq end-dis 1000000.0)
                         (setq best-jnx nil)
@@ -816,18 +817,17 @@
                           (setq tmp-jnx-dist (cdr tmp-jnx))
                           (setq tmp-jnx-name (nth m_n gjx-name-list))
 
-                          (setq dev-node (car proj-info))
                           (setq jnx-node (graph-get-node-index tmp-jnx-pt))
                           (if jnx-node
                             (progn
-                              (setq graph-dist (graph-get-distance dev-node jnx-node))
-                              (if (and graph-dist (< graph-dist 1e29))
+                              (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                              (if graph-dist
                                 (progn
                                   (setq use-bias
                                     (if (= tmp-jnx-name "RoomEntry")
                                       *main-room-bias*
                                       *main-junction-bias*))
-                                  (setq tmp-dis (+ (* (+ graph-dist proj-dist tmp-jnx-dist)
+                                  (setq tmp-dis (+ (* (+ graph-dist tmp-jnx-dist)
                                                        *main-cable-coefficient*)
                                              use-bias))
                                   (if (< tmp-dis end-dis)
