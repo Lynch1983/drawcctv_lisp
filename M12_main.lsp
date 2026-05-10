@@ -371,10 +371,6 @@
     )
   )
 
-  (dup-remove-all nil *main-temp-layer*)
-
-  (break-lines-all (list *main-temp-layer* *main-temp-layer2*))
-
   (princ "\n[main] Cable trays processed.")
   T
 )
@@ -609,6 +605,9 @@
 ;;;  Branch 1: No room + has junctions
 ;;;  Branch 2: Has room + has junctions
 ;;;  Branch 3: Has room + no junctions
+;;;  NOTE: device-project-to-graph adds ephemeral graph nodes that will be
+;;;        cleared by graph-build-from-lines. The persistent artifacts are
+;;;        the projection LINE entities drawn on *main-temp-layer*.
 ;;;  Returns: (gjx_list gjx_name_list) where gjx_list = ((pt . dist) ...)
 ;;;---------------------------------------------------------------
 (defun main-process-room-points (junction-ss room-pts / gjx-list gjx-name-list
@@ -642,7 +641,6 @@
     (progn
       (equiv-process-all ss)
       (dup-remove-all nil *main-temp-layer*)
-      (graph-floyd-compute)
       (princ "\n[main] Equivalent points processed.")
       T
     )
