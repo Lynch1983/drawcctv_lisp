@@ -4247,6 +4247,7 @@
 ;;;---------------------------------------------------------------
 (setq *device-search-radius* 1500.0)
 (setq *device-pipe-layer* nil)
+(setq *pipe-exit-search-radius* 50000.0)
 (setq *pipe-nodes* nil)
 (setq *pipe-edges* nil)
 (setq *pipe-exits* nil)
@@ -4615,14 +4616,15 @@
 ;;;  Returns: T on success, nil on failure
 ;;;---------------------------------------------------------------
 (defun device-build-pipe-graph (pipe-layer / ss i ent endpts p1 p2 idx1 idx2 d
-                                           pt tray-idx exit-info node-count)
+                                           pt tray-idx exit-info node-count
+                                           curve-len end-param)
   (setq *pipe-nodes* nil)
   (setq *pipe-edges* nil)
   (setq *pipe-exits* nil)
   (if (null pipe-layer)
     nil
     (progn
-      (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 pipe-layer))))
+      (setq ss (ssget "x" (list (cons 0 "LINE,LWPOLYLINE") (cons 8 pipe-layer))))
       (if (null ss)
         nil
         (progn
@@ -4636,7 +4638,12 @@
                 (setq p2 (cadr endpts))
                 (setq idx1 (pipe-add-node p1))
                 (setq idx2 (pipe-add-node p2))
-                (setq d (distance p1 p2))
+                (setq curve-len (vl-catch-all-apply 'vlax-curve-getDistAtPoint
+                                  (list ent p2)))
+                (if (and curve-len (not (vl-catch-all-error-p curve-len)) (> curve-len 0))
+                  (setq d curve-len)
+                  (setq d (distance p1 p2))
+                )
                 (if (/= idx1 idx2)
                   (setq *pipe-edges* (cons (list idx1 idx2 d) *pipe-edges*))
                 )
@@ -4676,7 +4683,7 @@
 ;;;---------------------------------------------------------------
 (defun pipe-find-nearest-tray-node (pt / i node-pt d best-idx best-d node-count)
   (setq best-idx nil)
-  (setq best-d *device-search-radius*)
+  (setq best-d *pipe-exit-search-radius*)
   (setq node-count (graph-get-node-count))
   (setq i 0)
   (repeat node-count
@@ -4711,7 +4718,7 @@
   (if (null layer-name)
     nil
     (progn
-      (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer-name))))
+      (setq ss (ssget "x" (list (cons 0 "LINE,LWPOLYLINE") (cons 8 layer-name))))
       (if ss
         (device-find-nearest-entity pt ss *device-search-radius*)
         nil
