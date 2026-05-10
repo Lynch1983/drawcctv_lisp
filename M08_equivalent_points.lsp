@@ -3,7 +3,7 @@
 ;;;  Handle equivalent connectivity points
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01, M07
+;;;  DEPENDENCIES: M01, M02, M07
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
@@ -35,7 +35,7 @@
     )
     (progn
       (setq id *equiv-next-id*)
-      (setq *equiv-pairs* (cons (list (list pt1 pt2) id) *equiv-pairs*))
+      (setq *equiv-pairs* (cons (list id (list pt1 pt2)) *equiv-pairs*))
       (setq *equiv-next-id* (1+ *equiv-next-id*))
       id
     )
@@ -45,7 +45,7 @@
 ;;;---------------------------------------------------------------
 ;;;  equiv-get-all-pairs
 ;;;  Get all equivalent point pairs
-;;;  Returns: list of ((pt1 pt2) id)
+;;;  Returns: list of (id (pt1 pt2))
 ;;;---------------------------------------------------------------
 (defun equiv-get-all-pairs ()
   *equiv-pairs*
@@ -63,9 +63,10 @@
 ;;;  equiv-process-all
 ;;;  Process all equivalent pairs and connect them to graph
 ;;;  Args: line-ss - selection set of lines for projection
+;;;        layer-name - layer name for drawing connection lines
 ;;;  Returns: number of connections made
 ;;;---------------------------------------------------------------
-(defun equiv-process-all (line-ss / count)
+(defun equiv-process-all (line-ss layer-name / count)
   (if (null line-ss)
     (progn
       (princ "\n[equiv] Error: nil selection set in equiv-process-all")
@@ -75,7 +76,7 @@
       (setq count 0)
       (princ (strcat "\n[equiv] Processing " (itoa (length *equiv-pairs*)) " equivalent pairs..."))
       (foreach pair *equiv-pairs*
-        (if (equiv-connect-pair (car pair) line-ss)
+        (if (equiv-connect-pair (cadr pair) line-ss layer-name)
           (setq count (1+ count))
         )
       )
@@ -90,39 +91,29 @@
 ;;;  Connect one equivalent pair to the graph
 ;;;  Args: pt-pair - (pt1 pt2)
 ;;;         line-ss - selection set of lines
+;;;         layer-name - layer name for drawing connection LINE
 ;;;  Returns: T if connected, nil otherwise
 ;;;---------------------------------------------------------------
-(defun equiv-connect-pair (pt-pair line-ss / pt1 pt2 proj1 proj2 edge-result)
+(defun equiv-connect-pair (pt-pair line-ss layer-name / pt1 pt2 proj1 proj2)
   (setq pt1 (car pt-pair))
   (setq pt2 (cadr pt-pair))
-  (setq proj1 (device-project-to-graph pt1 line-ss nil))
+  (setq proj1 (device-find-nearest-line pt1 line-ss nil))
   (if (null proj1)
     (progn
-      (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt1")
+      (princ "\n[equiv] Warning: device-find-nearest-line returned nil for pt1")
       nil
     )
     (progn
-      (setq proj2 (device-project-to-graph pt2 line-ss nil))
+      (setq proj2 (device-find-nearest-line pt2 line-ss nil))
       (if (null proj2)
         (progn
-          (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt2")
+          (princ "\n[equiv] Warning: device-find-nearest-line returned nil for pt2")
           nil
         )
         (progn
-          (setq edge-result
-            (vl-catch-all-apply
-              'graph-add-edge
-              (list (car proj1) (car proj2) (distance (cadr proj1) (cadr proj2)))
-            )
-          )
-          (if (vl-catch-all-error-p edge-result)
-            (progn
-              (princ (strcat "\n[equiv] Error: graph-add-edge failed - "
-                             (vl-catch-all-error-message edge-result)))
-              nil
-            )
-            T
-          )
+          (entmakex (list (cons 0 "LINE") (cons 8 layer-name)
+                          (cons 10 (cadr proj1)) (cons 11 (cadr proj2))))
+          T
         )
       )
     )

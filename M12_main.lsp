@@ -638,7 +638,7 @@
   (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
   (if ss
     (progn
-      (equiv-process-all ss)
+      (equiv-process-all ss *main-temp-layer*)
       (dup-remove-all nil *main-temp-layer*)
       (princ "\n[main] Equivalent points processed.")
       T
