@@ -4251,6 +4251,7 @@
 (setq *pipe-nodes* nil)
 (setq *pipe-edges* nil)
 (setq *pipe-exits* nil)
+(setq *pipe-dist-matrix* nil)
 
 ;;;---------------------------------------------------------------
 ;;;  device-find-nearest-entity
@@ -4666,6 +4667,7 @@
             )
             (setq i (1+ i))
           )
+          (pipe-floyd-compute)
           (princ (strcat "\n[pipe] Graph: " (itoa (length *pipe-nodes*)) " nodes, "
                          (itoa (length *pipe-edges*)) " edges, "
                          (itoa (length *pipe-exits*)) " exits."))
@@ -4674,6 +4676,88 @@
       )
     )
   )
+)
+
+;;;---------------------------------------------------------------
+;;;  pipe-floyd-compute
+;;;  Compute all-pairs shortest paths on pipe graph using Floyd
+;;;  Result stored in *pipe-dist-matrix*
+;;;  Complexity: O(V^3) where V = pipe node count (typically small)
+;;;---------------------------------------------------------------
+(defun pipe-floyd-compute (/ n i j k row dist-ij dist-ik dist-kj new-dist)
+  (setq n (length *pipe-nodes*))
+  (if (= n 0)
+    (progn
+      (setq *pipe-dist-matrix* nil)
+      nil
+    )
+    (progn
+      (setq *pipe-dist-matrix* nil)
+      (setq i 0)
+      (repeat n
+        (setq row nil)
+        (setq j 0)
+        (repeat n
+          (setq row (cons (if (= i j) 0.0 1e30) row))
+          (setq j (1+ j))
+        )
+        (setq *pipe-dist-matrix* (cons (reverse row) *pipe-dist-matrix*))
+        (setq i (1+ i))
+      )
+      (setq *pipe-dist-matrix* (reverse *pipe-dist-matrix*))
+      (foreach edge *pipe-edges*
+        (setq i (car edge))
+        (setq j (cadr edge))
+        (setq dist-ij (caddr edge))
+        (pipe-matrix-set i j dist-ij)
+        (pipe-matrix-set j i dist-ij)
+      )
+      (setq k 0)
+      (repeat n
+        (setq i 0)
+        (repeat n
+          (setq j 0)
+          (repeat n
+            (setq dist-ik (pipe-matrix-get i k))
+            (setq dist-kj (pipe-matrix-get k j))
+            (if (and dist-ik dist-kj (< dist-ik 1e29) (< dist-kj 1e29))
+              (progn
+                (setq new-dist (+ dist-ik dist-kj))
+                (if (< new-dist (pipe-matrix-get i j))
+                  (progn
+                    (pipe-matrix-set i j new-dist)
+                  )
+                )
+              )
+            )
+            (setq j (1+ j))
+          )
+          (setq i (1+ i))
+        )
+        (setq k (1+ k))
+      )
+      (princ (strcat "\n[pipe] Floyd computed for " (itoa n) " nodes."))
+      T
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  pipe-matrix-get
+;;;  Get distance from pipe distance matrix
+;;;---------------------------------------------------------------
+(defun pipe-matrix-get (i j / row)
+  (setq row (nth i *pipe-dist-matrix*))
+  (if row (nth j row) nil)
+)
+
+;;;---------------------------------------------------------------
+;;;  pipe-matrix-set
+;;;  Set distance in pipe distance matrix
+;;;---------------------------------------------------------------
+(defun pipe-matrix-set (i j val / new-row)
+  (setq new-row (pipe-list-set (nth i *pipe-dist-matrix*) j val))
+  (setq *pipe-dist-matrix* (pipe-list-set *pipe-dist-matrix* i new-row))
 )
 
 ;;;---------------------------------------------------------------
@@ -4754,13 +4838,22 @@
 ;;;           reachable exit, or nil
 ;;;           pipe-total-dist = cam_to_pipe + pipe_path + exit_to_tray
 ;;;---------------------------------------------------------------
+;;;---------------------------------------------------------------
+;;;  device-connect-plan-b
+;;;  Plan B: Route device through pipe network to cable tray.
+;;;          Uses precomputed *pipe-dist-matrix* for O(1) lookup.
+;;;  Args: base-pt     - device base point
+;;;         pipe-layer  - pipe layer name
+;;;  Returns: list of (tray-node-idx . pipe-total-dist) for each
+;;;           reachable exit, or nil
+;;;---------------------------------------------------------------
 (defun device-connect-plan-b (base-pt pipe-layer /
                                        pipe-result pipe-ent pipe-proj-pt pipe-proj-dist
                                        endpts ep1 ep2 ep1-idx ep2-idx
-                                       dist1 dist2 exit-list exit
+                                       d1 d2 exit-list exit
                                        exit-pipe-idx tray-idx exit-dist
-                                       d1 d2 pipe-path-dist total-pipe-dist)
-  (if (or (null pipe-layer) (null *pipe-nodes*) (null *pipe-exits*))
+                                       pipe-path-dist)
+  (if (or (null pipe-layer) (null *pipe-nodes*) (null *pipe-exits*) (null *pipe-dist-matrix*))
     nil
     (progn
       (setq pipe-result (device-find-nearest-on-layer base-pt pipe-layer))
@@ -4778,25 +4871,23 @@
               (setq ep2 (cadr endpts))
               (setq ep1-idx (pipe-add-node ep1))
               (setq ep2-idx (pipe-add-node ep2))
-              (setq dist1 (pipe-dijkstra ep1-idx))
-              (setq dist2 (pipe-dijkstra ep2-idx))
               (setq exit-list nil)
               (foreach exit *pipe-exits*
                 (setq exit-pipe-idx (car exit))
                 (setq tray-idx (cadr exit))
                 (setq exit-dist (caddr exit))
                 (setq pipe-path-dist nil)
-                (if (and dist1 (nth exit-pipe-idx dist1) (< (nth exit-pipe-idx dist1) 1e29))
+                (setq d1 (pipe-matrix-get ep1-idx exit-pipe-idx))
+                (if (and d1 (< d1 1e29))
                   (progn
-                    (setq d1 (+ pipe-proj-dist (distance pipe-proj-pt ep1)
-                                (nth exit-pipe-idx dist1) exit-dist))
+                    (setq d1 (+ pipe-proj-dist (distance pipe-proj-pt ep1) d1 exit-dist))
                     (setq pipe-path-dist d1)
                   )
                 )
-                (if (and dist2 (nth exit-pipe-idx dist2) (< (nth exit-pipe-idx dist2) 1e29))
+                (setq d2 (pipe-matrix-get ep2-idx exit-pipe-idx))
+                (if (and d2 (< d2 1e29))
                   (progn
-                    (setq d2 (+ pipe-proj-dist (distance pipe-proj-pt ep2)
-                                (nth exit-pipe-idx dist2) exit-dist))
+                    (setq d2 (+ pipe-proj-dist (distance pipe-proj-pt ep2) d2 exit-dist))
                     (if (or (null pipe-path-dist) (< d2 pipe-path-dist))
                       (setq pipe-path-dist d2)
                     )
