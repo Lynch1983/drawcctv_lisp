@@ -743,7 +743,7 @@
                               workflow-ok draw-pts i ent
                               base-pt proj-pt proj-dist nearest-line nearest-ent
                               dev-name blk-name plan-result plan-method
-                              entry-node pipe-dist
+                              entry-node pipe-dist tmp-graph-dist tmp-gd
                               tmp-dis end-dis best-jnx best-name
                               graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
@@ -790,6 +790,12 @@
     (progn
       (princ "\n[main] Workflow aborted: graph build failed.")
       (setq workflow-ok nil)
+    )
+  )
+
+  (if workflow-ok
+    (progn
+      (device-build-pipe-graph *main-pipe-layer*)
     )
   )
 
@@ -863,30 +869,56 @@
                                   (setq proj-dist (cadr plan-result))
                                   (setq nearest-ent (caddr plan-result))
                                   (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
-                                )
-                                (progn
-                                  (setq entry-node (cadr plan-result))
-                                  (setq pipe-dist (caddr plan-result))
-                                  (setq graph-dist (graph-get-distance entry-node jnx-node))
                                   (if graph-dist
-                                    (setq graph-dist (+ pipe-dist graph-dist))
+                                    (progn
+                                      (setq use-bias
+                                        (if (= tmp-jnx-name "RoomEntry")
+                                          *main-room-bias*
+                                          *main-junction-bias*))
+                                      (setq tmp-dis (+ (* (+ graph-dist tmp-jnx-dist)
+                                                           *main-cable-coefficient*)
+                                                 use-bias))
+                                      (if (< tmp-dis end-dis)
+                                        (progn
+                                          (setq end-dis tmp-dis)
+                                          (setq best-jnx tmp-jnx)
+                                          (setq best-name tmp-jnx-name)
+                                        )
+                                      )
+                                    )
                                   )
                                 )
-                              )
-                              (if graph-dist
                                 (progn
-                                  (setq use-bias
-                                    (if (= tmp-jnx-name "RoomEntry")
-                                      *main-room-bias*
-                                      *main-junction-bias*))
-                                  (setq tmp-dis (+ (* (+ graph-dist tmp-jnx-dist)
-                                                       *main-cable-coefficient*)
-                                             use-bias))
-                                  (if (< tmp-dis end-dis)
+                                  (setq graph-dist nil)
+                                  (foreach exit plan-result
+                                    (setq entry-node (car exit))
+                                    (setq pipe-dist (cdr exit))
+                                    (setq tmp-graph-dist (graph-get-distance entry-node jnx-node))
+                                    (if tmp-graph-dist
+                                      (progn
+                                        (setq tmp-gd (+ pipe-dist tmp-graph-dist))
+                                        (if (or (null graph-dist) (< tmp-gd graph-dist))
+                                          (setq graph-dist tmp-gd)
+                                        )
+                                      )
+                                    )
+                                  )
+                                  (if graph-dist
                                     (progn
-                                      (setq end-dis tmp-dis)
-                                      (setq best-jnx tmp-jnx)
-                                      (setq best-name tmp-jnx-name)
+                                      (setq use-bias
+                                        (if (= tmp-jnx-name "RoomEntry")
+                                          *main-room-bias*
+                                          *main-junction-bias*))
+                                      (setq tmp-dis (+ (* (+ graph-dist tmp-jnx-dist)
+                                                           *main-cable-coefficient*)
+                                                 use-bias))
+                                      (if (< tmp-dis end-dis)
+                                        (progn
+                                          (setq end-dis tmp-dis)
+                                          (setq best-jnx tmp-jnx)
+                                          (setq best-name tmp-jnx-name)
+                                        )
+                                      )
                                     )
                                   )
                                 )
