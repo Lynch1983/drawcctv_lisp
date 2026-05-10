@@ -246,6 +246,98 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  device-find-nearest-on-layer
+;;;  Find the nearest LINE entity on a specific layer
+;;;  Args: pt         - point to project
+;;;         layer-name - layer name to search on
+;;;  Returns: (entity closest-point distance) or nil
+;;;---------------------------------------------------------------
+(defun device-find-nearest-on-layer (pt layer-name / ss)
+  (if (null layer-name)
+    nil
+    (progn
+      (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer-name))))
+      (if ss
+        (device-find-nearest-entity pt ss *device-search-radius*)
+        nil
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  device-connect-plan-a
+;;;  Plan A: Project device point directly to cable tray lines
+;;;  Args: base-pt   - device base point
+;;;         tray-ss   - selection set of cable tray LINEs (nil=all)
+;;;  Returns: (proj-pt proj-dist nearest-ent) or nil
+;;;---------------------------------------------------------------
+(defun device-connect-plan-a (base-pt tray-ss / result)
+  (setq result (device-find-nearest-line base-pt tray-ss nil))
+  (if result
+    (list (cadr result) (caddr result) (car result))
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  device-connect-plan-b
+;;;  Plan B: Project device point to pipe layer, route via pipe
+;;;          to cable tray network
+;;;  Args: base-pt     - device base point
+;;;         pipe-layer  - pipe layer name
+;;;  Returns: (proj-pt proj-dist nearest-ent) or nil
+;;;---------------------------------------------------------------
+(defun device-connect-plan-b (base-pt pipe-layer / result)
+  (if (null pipe-layer)
+    nil
+    (progn
+      (setq result (device-find-nearest-on-layer base-pt pipe-layer))
+      (if result
+        (list (cadr result) (caddr result) (car result))
+        nil
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  device-connect-plan-c
+;;;  Plan C: Direct line to nearest junction/room entry point
+;;;          No graph network dependency
+;;;  Args: base-pt      - device base point
+;;;         gjx-list     - list of (proj-pt . proj-dist)
+;;;         gjx-name-list - list of junction names
+;;;  Returns: (best-jnx-pt best-jnx-dist best-jnx-name) or nil
+;;;---------------------------------------------------------------
+(defun device-connect-plan-c (base-pt gjx-list gjx-name-list /
+                                       m_n tmp-jnx tmp-jnx-pt tmp-jnx-dist
+                                       tmp-jnx-name tmp-dis best-jnx best-dist best-name)
+  (setq best-jnx nil)
+  (setq best-dist 1e30)
+  (setq best-name nil)
+  (setq m_n 0)
+  (repeat (length gjx-list)
+    (setq tmp-jnx (nth m_n gjx-list))
+    (setq tmp-jnx-pt (car tmp-jnx))
+    (setq tmp-jnx-dist (cdr tmp-jnx))
+    (setq tmp-jnx-name (nth m_n gjx-name-list))
+    (setq tmp-dis (distance base-pt tmp-jnx-pt))
+    (if (< tmp-dis best-dist)
+      (progn
+        (setq best-dist tmp-dis)
+        (setq best-jnx tmp-jnx)
+        (setq best-name tmp-jnx-name)
+      )
+    )
+    (setq m_n (1+ m_n))
+  )
+  (if best-jnx
+    (list (car best-jnx) best-dist best-name)
+    nil
+  )
+)
+;;;---------------------------------------------------------------
 ;;;  device-set-search-radius
 ;;;  Set the search radius for finding nearest lines
 ;;;---------------------------------------------------------------

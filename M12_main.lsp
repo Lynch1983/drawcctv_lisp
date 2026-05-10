@@ -377,6 +377,33 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  main-process-pipe-layer
+;;;  Process pipe layer MLINEs into LINEs on temp-layer2
+;;;---------------------------------------------------------------
+(defun main-process-pipe-layer (/ lines)
+  (if (null *main-pipe-layer*)
+    (progn
+      (princ "\n[main] No pipe layer configured, skipping pipe processing.")
+      nil
+    )
+    (progn
+      (princ "\n[main] Processing pipe layer...")
+      (setq lines (mline-process-all (list *main-pipe-layer*) *main-temp-layer2* nil nil))
+      (if lines
+        (progn
+          (princ (strcat "\n[main] Pipe layer processed to " *main-temp-layer2* "."))
+          T
+        )
+        (progn
+          (princ "\n[main] Warning: Pipe layer MLINE conversion returned nil.")
+          nil
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
 ;;;  main-build-graph
 ;;;  Build graph from processed lines
 ;;;---------------------------------------------------------------
@@ -715,7 +742,7 @@
                               gjx-list gjx-name-list connections
                               workflow-ok draw-pts i ent
                               base-pt proj-pt proj-dist nearest-line nearest-ent
-                              dev-name blk-name
+                              dev-name blk-name plan-result plan-method
                               tmp-dis end-dis best-jnx best-name
                               graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
@@ -745,6 +772,8 @@
 
   (princ "\n[main] Removing duplicates...")
   (dup-remove-all nil *main-temp-layer*)
+
+  (main-process-pipe-layer)
 
   (setq junction-ss (main-get-junction-blocks))
   (setq room-result (main-process-room-points junction-ss *main-room-points*))
@@ -801,12 +830,21 @@
                     (setq dev-name (block-get-name-from-text ent nil))
                     (if (null dev-name) (setq dev-name "CAM"))
 
-                    (setq nearest-line (device-find-nearest-line base-pt nil nil))
-                    (if nearest-line
+                    (setq plan-result (device-connect-plan-a base-pt nil))
+                    (setq plan-method "A")
+
+                    (if (null plan-result)
                       (progn
-                        (setq proj-pt (cadr nearest-line))
-                        (setq proj-dist (caddr nearest-line))
-                        (setq nearest-ent (car nearest-line))
+                        (setq plan-result (device-connect-plan-b base-pt *main-pipe-layer*))
+                        (if plan-result (setq plan-method "B"))
+                      )
+                    )
+
+                    (if plan-result
+                      (progn
+                        (setq proj-pt (car plan-result))
+                        (setq proj-dist (cadr plan-result))
+                        (setq nearest-ent (caddr plan-result))
 
                         (setq end-dis 1000000.0)
                         (setq best-jnx nil)
@@ -850,14 +888,42 @@
                           (progn
                             (setq end-drawlist
                               (append end-drawlist
-                                      (list (list end-dis blk-name dev-name best-name))))
+                                      (list (list end-dis blk-name dev-name best-name plan-method))))
                             (princ (strcat "\n  CAM: " dev-name " -> " best-name
-                                           " dist=" (rtos end-dis 2 0)))
+                                           " Plan" plan-method " dist=" (rtos end-dis 2 0)))
+                          )
+                          (progn
+                            (setq plan-result (device-connect-plan-c base-pt gjx-list gjx-name-list))
+                            (if plan-result
+                              (progn
+                                (setq best-name (caddr plan-result))
+                                (setq end-dis (* (cadr plan-result) *main-cable-coefficient*))
+                                (setq end-drawlist
+                                  (append end-drawlist
+                                          (list (list end-dis blk-name dev-name best-name "C"))))
+                                (princ (strcat "\n  CAM: " dev-name " -> " best-name
+                                               " PlanC dist=" (rtos end-dis 2 0)))
+                              )
+                              (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
+                            )
+                          )
+                        )
+                      )
+                      (progn
+                        (setq plan-result (device-connect-plan-c base-pt gjx-list gjx-name-list))
+                        (if plan-result
+                          (progn
+                            (setq best-name (caddr plan-result))
+                            (setq end-dis (* (cadr plan-result) *main-cable-coefficient*))
+                            (setq end-drawlist
+                              (append end-drawlist
+                                      (list (list end-dis blk-name dev-name best-name "C"))))
+                            (princ (strcat "\n  CAM: " dev-name " -> " best-name
+                                           " PlanC dist=" (rtos end-dis 2 0)))
                           )
                           (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
                         )
                       )
-                      (princ (strcat "\n  CAM: " dev-name " -> projection failed"))
                     )
                   )
                 )
