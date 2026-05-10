@@ -1,11 +1,350 @@
 ;;;===============================================================
-;;;  CCTV All-In-One Module
-;;;  Combined from 13 module files
-;;;  Modules: M01-M13
+;;;  CCTV System - All-In-One Loader
+;;;  Auto-load all modules by loading this single file
+;;;  ENCODING: ANSI (ASCII only)
+;;;  AutoCAD 2018+ required
+;;;===============================================================
+(princ "\nLoading CCTV System...")
+
+;;;===============================================================
+;;;===============================================================
+;;;  M00 - Spatial Index and Geometry Utilities
+;;;  Shared spatial hashing, bounding box, and point utilities
+;;;  Used by: M04 (duplicate_remover), M05 (break_lines)
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
+;;;  DEPENDENCIES: M02 (line_utils.lsp) - for sp-box-from-line
 ;;;===============================================================
 
+;;;---------------------------------------------------------------
+;;;  sp-spatial-hash
+;;;  Compute spatial hash cell keys for a bounding box
+;;;  Args: box - (min-x min-y max-x max-y)
+;;;         cell-size - spatial grid cell size
+;;;  Returns: list of string cell keys like "cx_cy"
+;;;---------------------------------------------------------------
+(defun sp-spatial-hash (box cell-size / min-cx min-cy max-cx max-cy cx cy cells)
+  (setq min-cx (fix (/ (nth 0 box) cell-size)))
+  (setq min-cy (fix (/ (nth 1 box) cell-size)))
+  (setq max-cx (fix (/ (nth 2 box) cell-size)))
+  (setq max-cy (fix (/ (nth 3 box) cell-size)))
+  (setq cells nil)
+  (setq cx min-cx)
+  (while (<= cx max-cx)
+    (setq cy min-cy)
+    (while (<= cy max-cy)
+      (setq cells (cons (strcat (itoa cx) "_" (itoa cy)) cells))
+      (setq cy (1+ cy))
+    )
+    (setq cx (1+ cx))
+  )
+  cells
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-build-index
+;;;  Build a spatial hash index from a list of records
+;;;  Each record must have a bounding box at a specified position
+;;;  Args: records - list of records (any structure)
+;;;         box-fn  - function that extracts box from a record
+;;;         cell-size - spatial grid cell size
+;;;  Returns: assoc list of (cell-key . (record-index ...))
+;;;---------------------------------------------------------------
+(defun sp-build-index (records box-fn cell-size / idx rec box cells cell-key i)
+  (setq idx nil)
+  (setq i 0)
+  (foreach rec records
+    (setq box (apply box-fn (list rec)))
+    (if box
+      (progn
+        (setq cells (sp-spatial-hash box cell-size))
+        (foreach ck cells
+          (setq cell-key (assoc ck idx))
+          (if cell-key
+            (setq idx (subst (cons ck (cons i (cdr cell-key))) cell-key idx))
+            (setq idx (cons (list ck i) idx))
+          )
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+  idx
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-get-candidates
+;;;  Get candidate record indices from spatial index for a given box
+;;;  Args: box - bounding box
+;;;         idx - spatial index from sp-build-index
+;;;         cell-size - grid cell size
+;;;  Returns: sorted list of unique candidate indices
+;;;---------------------------------------------------------------
+(defun sp-get-candidates (box idx cell-size / cells candidates cell-records)
+  (setq cells (sp-spatial-hash box cell-size))
+  (setq candidates nil)
+  (foreach ck cells
+    (setq cell-records (assoc ck idx))
+    (if cell-records
+      (foreach ri (cdr cell-records)
+        (if (not (member ri candidates))
+          (setq candidates (cons ri candidates))
+        )
+      )
+    )
+  )
+  (vl-sort-i candidates '<)
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-box-from-pts
+;;;  Get bounding box from two endpoints
+;;;  Args: pts - (pt1 pt2)
+;;;  Returns: (min-x min-y max-x max-y) or nil
+;;;---------------------------------------------------------------
+(defun sp-box-from-pts (pts / x1 y1 x2 y2)
+  (if (and pts (= (length pts) 2))
+    (progn
+      (setq x1 (car (car pts)) y1 (cadr (car pts)))
+      (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
+      (list (min x1 x2) (min y1 y2) (max x1 x2) (max y1 y2))
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-box-from-line
+;;;  Get bounding box from a LINE entity
+;;;  Args: ent - entity name
+;;;  Returns: (min-x min-y max-x max-y) or nil
+;;;---------------------------------------------------------------
+(defun sp-box-from-line (ent / pts)
+  (setq pts (line-get-endpoints ent))
+  (sp-box-from-pts pts)
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-boxes-overlap-p
+;;;  Check if two bounding boxes overlap (with optional tolerance)
+;;;  Args: box1, box2 - bounding boxes
+;;;         tol - tolerance (nil = 0.0)
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun sp-boxes-overlap-p (box1 box2 tol / t)
+  (if (null tol) (setq tol 0.0))
+  (if (and box1 box2)
+    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))
+             (< (nth 2 box2) (- (nth 0 box1) tol))
+             (< (nth 3 box1) (- (nth 1 box2) tol))
+             (< (nth 3 box2) (- (nth 1 box1) tol))))
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-point-in-list-p
+;;;  Check if a point is already in a list (within tolerance)
+;;;  Args: pt      - point to check
+;;;         pt-list - list of points
+;;;         tol     - distance tolerance
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun sp-point-in-list-p (pt pt-list tol / found)
+  (setq found nil)
+  (foreach p pt-list
+    (if (< (distance pt p) tol)
+      (setq found T)
+    )
+  )
+  found
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-remove-duplicate-points
+;;;  Remove duplicate points from a list
+;;;  Args: pt-list - list of points
+;;;         tol     - distance tolerance
+;;;  Returns: list with duplicates removed
+;;;---------------------------------------------------------------
+(defun sp-remove-duplicate-points (pt-list tol / result)
+  (setq result nil)
+  (foreach pt pt-list
+    (if (not (sp-point-in-list-p pt result tol))
+      (setq result (cons pt result))
+    )
+  )
+  (reverse result)
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-sort-points-by-distance
+;;;  Sort points by distance from a reference point
+;;;  Args: ref-pt  - reference point
+;;;         pt-list - list of points to sort
+;;;  Returns: sorted list of points
+;;;---------------------------------------------------------------
+(defun sp-sort-points-by-distance (ref-pt pt-list / dist-list)
+  (setq dist-list nil)
+  (foreach pt pt-list
+    (setq dist-list (cons (cons (distance ref-pt pt) pt) dist-list))
+  )
+  (setq dist-list (vl-sort dist-list '(lambda (a b) (< (car a) (car b)))))
+  (mapcar 'cdr dist-list)
+)
+
+;;;---------------------------------------------------------------
+;;;  sp-default-cell-size
+;;;  Get/Set the default spatial hash cell size
+;;;---------------------------------------------------------------
+(setq *sp-default-cell-size* 5000.0)
+
+(defun sp-set-cell-size (val)
+  (setq *sp-default-cell-size* val)
+)
+
+(defun sp-get-cell-size ()
+  *sp-default-cell-size*
+)
+
+;;;===============================================================
+;;;  TEST FUNCTIONS
+;;;===============================================================
+
+(defun test-M00-spatial-index (/ passed failed box cells idx records
+                                 candidates box1 box2 pts sorted-pts)
+  (setq passed 0 failed 0)
+
+  (princ "\n\n=== M00 Spatial Index Tests ===")
+
+  (princ "\n[Test 1] sp-spatial-hash...")
+  (setq box (list 0.0 0.0 5000.0 5000.0))
+  (setq cells (sp-spatial-hash box 5000.0))
+  (if (and cells (= (length cells) 1)
+           (stringp (car cells)))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 2] sp-spatial-hash (multi-cell)...")
+  (setq box (list 0.0 0.0 10000.0 5000.0))
+  (setq cells (sp-spatial-hash box 5000.0))
+  (if (and cells (= (length cells) 2))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 3] sp-box-from-pts...")
+  (setq pts (list (list 100.0 200.0 0.0) (list 300.0 50.0 0.0)))
+  (setq box (sp-box-from-pts pts))
+  (if (and box
+           (< (abs (- (nth 0 box) 100.0)) 0.001)
+           (< (abs (- (nth 1 box) 50.0)) 0.001)
+           (< (abs (- (nth 2 box) 300.0)) 0.001)
+           (< (abs (- (nth 3 box) 200.0)) 0.001))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 4] sp-boxes-overlap-p (overlapping)...")
+  (setq box1 (list 0.0 0.0 1000.0 1000.0))
+  (setq box2 (list 500.0 500.0 1500.0 1500.0))
+  (if (sp-boxes-overlap-p box1 box2 nil)
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 5] sp-boxes-overlap-p (non-overlapping)...")
+  (setq box1 (list 0.0 0.0 100.0 100.0))
+  (setq box2 (list 200.0 200.0 300.0 300.0))
+  (if (null (sp-boxes-overlap-p box1 box2 nil))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 6] sp-boxes-overlap-p (with tolerance)...")
+  (setq box1 (list 0.0 0.0 100.0 100.0))
+  (setq box2 (list 101.0 101.0 200.0 200.0))
+  (if (and (null (sp-boxes-overlap-p box1 box2 nil))
+           (sp-boxes-overlap-p box1 box2 2.0))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 7] sp-point-in-list-p...")
+  (setq pt-list (list (list 100.0 100.0 0.0) (list 200.0 200.0 0.0)))
+  (if (and (sp-point-in-list-p (list 100.0 100.0 0.0) pt-list 0.01)
+           (sp-point-in-list-p (list 100.001 100.0 0.0) pt-list 0.01)
+           (null (sp-point-in-list-p (list 300.0 300.0 0.0) pt-list 0.01)))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 8] sp-remove-duplicate-points...")
+  (setq pt-list (list (list 100.0 100.0 0.0)
+                      (list 100.001 100.0 0.0)
+                      (list 200.0 200.0 0.0)
+                      (list 100.0 100.0 0.0)))
+  (setq unique (sp-remove-duplicate-points pt-list 0.01))
+  (if (= (length unique) 2)
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 9] sp-sort-points-by-distance...")
+  (setq ref (list 0.0 0.0 0.0))
+  (setq pt-list (list (list 800.0 0.0 0.0)
+                      (list 200.0 0.0 0.0)
+                      (list 500.0 0.0 0.0)))
+  (setq sorted (sp-sort-points-by-distance ref pt-list))
+  (if (and sorted
+           (= (length sorted) 3)
+           (< (abs (- (car (car sorted)) 200.0)) 0.001)
+           (< (abs (- (car (cadr sorted)) 500.0)) 0.001)
+           (< (abs (- (car (caddr sorted)) 800.0)) 0.001))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 10] sp-build-index and sp-get-candidates...")
+  (setq records (list (list nil nil (list 0.0 0.0 1000.0 1000.0))
+                      (list nil nil (list 5000.0 5000.0 6000.0 6000.0))
+                      (list nil nil (list 500.0 500.0 1500.0 1500.0))))
+  (setq idx (sp-build-index records '(lambda (r) (caddr r)) 5000.0))
+  (setq candidates (sp-get-candidates (list 0.0 0.0 1000.0 1000.0) idx 5000.0))
+  (if (and idx (> (length candidates) 0))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 11] cell size get/set...")
+  (setq old-cs (sp-get-cell-size))
+  (sp-set-cell-size 10000.0)
+  (if (= (sp-get-cell-size) 10000.0)
+    (progn
+      (princ " PASS")
+      (setq passed (1+ passed))
+      (sp-set-cell-size old-cs)
+    )
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ (strcat "\n\n=== M00 Test Summary: "
+                 (itoa passed) " passed, "
+                 (itoa failed) " failed ===\n"))
+
+  (list passed failed)
+)
+
+;;;---------------------------------------------------------------
+(princ "\n[M00] spatial_index.lsp loaded.")
+(princ "  Functions: sp-spatial-hash, sp-build-index, sp-get-candidates,")
+(princ "  sp-box-from-pts, sp-box-from-line, sp-boxes-overlap-p,")
+(princ "  sp-point-in-list-p, sp-remove-duplicate-points, sp-sort-points-by-distance")
+(princ "\n  Test: (test-M00-spatial-index)")
+(princ)
+
+;;;===============================================================
 ;;;===============================================================
 ;;;  M01 - Graph Algorithm Module
 ;;;  Core graph data structure and Floyd-Warshall shortest path
@@ -142,13 +481,11 @@
 ;;;  Returns: T if added, nil if duplicate
 ;;;---------------------------------------------------------------
 (defun graph-add-edge (nodeA nodeB weight / key adjA adjB)
-  ;; check duplicate
   (setq key (cons (min nodeA nodeB) (max nodeA nodeB)))
   (if (assoc key *graph-edges*)
-    nil  ; duplicate edge
+    nil
     (progn
       (setq *graph-edges* (cons (cons key weight) *graph-edges*))
-      ;; update adjacency list for nodeA
       (setq adjA (assoc nodeA *graph-adj*))
       (if adjA
         (setq *graph-adj*
@@ -156,7 +493,6 @@
         )
         (setq *graph-adj* (cons (list nodeA (cons nodeB weight)) *graph-adj*))
       )
-      ;; update adjacency list for nodeB
       (setq adjB (assoc nodeB *graph-adj*))
       (if adjB
         (setq *graph-adj*
@@ -199,19 +535,24 @@
 ;;;  Returns: list of point(s), nil if unsupported type
 ;;;---------------------------------------------------------------
 (defun graph-get-line-points (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (cond
-    ((= etype "LINE")
-     (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq etype (cdr (assoc 0 elist)))
+      (cond
+        ((= etype "LINE")
+         (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+        )
+        ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
+         (graph-get-polyline-points ent)
+        )
+        ((= etype "ARC")
+         (graph-get-arc-points ent)
+        )
+        (T nil)
+      )
     )
-    ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
-     (graph-get-polyline-points ent)
-    )
-    ((= etype "ARC")
-     (graph-get-arc-points ent)
-    )
-    (T nil)
   )
 )
 
@@ -221,24 +562,34 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: list of points
 ;;;---------------------------------------------------------------
-(defun graph-get-polyline-points (ent / obj pts n i pt)
+(defun graph-get-polyline-points (ent / obj pts n i pt result)
   (vl-load-com)
-  (setq obj (vlax-ename->vla-object ent))
-  (setq pts nil)
-  (if (= (vla-get-ObjectName obj) "AcDbPolyline")
-    (progn
-      (setq n (fix (vlax-get obj 'NumberOfVertices)))
-      (setq i 0)
-      (repeat n
-        (setq pt (vlax-get obj (strcat "Coordinate" (itoa i))))
-        (if pt
-          (setq pts (cons (list (car pt) (cadr pt) 0.0) pts))
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (setq obj (vlax-ename->vla-object ent))
+        (setq pts nil)
+        (if (= (vla-get-ObjectName obj) "AcDbPolyline")
+          (progn
+            (setq n (fix (vlax-get obj 'NumberOfVertices)))
+            (setq i 0)
+            (repeat n
+              (setq pt (vlax-get obj (strcat "Coordinate" (itoa i))))
+              (if pt
+                (setq pts (cons (list (car pt) (cadr pt) 0.0) pts))
+              )
+              (setq i (1+ i))
+            )
+            (reverse pts)
+          )
+          nil
         )
-        (setq i (1+ i))
       )
-      (reverse pts)
     )
+  )
+  (if (vl-catch-all-error-p result)
     nil
+    result
   )
 )
 
@@ -248,18 +599,28 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: list of 2 points (start, end)
 ;;;---------------------------------------------------------------
-(defun graph-get-arc-points (ent / obj center radius sa ea)
+(defun graph-get-arc-points (ent / obj center radius sa ea result)
   (vl-load-com)
-  (setq obj (vlax-ename->vla-object ent))
-  (setq center (vlax-get obj 'Center))
-  (setq radius (vlax-get obj 'Radius))
-  (setq sa (vlax-get obj 'StartAngle))
-  (setq ea (vlax-get obj 'EndAngle))
-  (list
-    (list (+ (car center) (* radius (cos sa)))
-          (+ (cadr center) (* radius (sin sa))) 0.0)
-    (list (+ (car center) (* radius (cos ea)))
-          (+ (cadr center) (* radius (sin ea))) 0.0)
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (setq obj (vlax-ename->vla-object ent))
+        (setq center (vlax-get obj 'Center))
+        (setq radius (vlax-get obj 'Radius))
+        (setq sa (vlax-get obj 'StartAngle))
+        (setq ea (vlax-get obj 'EndAngle))
+        (list
+          (list (+ (car center) (* radius (cos sa)))
+                (+ (cadr center) (* radius (sin sa))) 0.0)
+          (list (+ (car center) (* radius (cos ea)))
+                (+ (cadr center) (* radius (sin ea))) 0.0)
+        )
+      )
+    )
+  )
+  (if (vl-catch-all-error-p result)
+    nil
+    result
   )
 )
 
@@ -290,7 +651,7 @@
         (if ent
           (progn
             (setq pts (graph-get-line-points ent))
-            (if (= (length pts) 2)
+            (if (and pts (= (length pts) 2))
               (progn
                 (setq pt1 (car pts))
                 (setq pt2 (cadr pts))
@@ -329,7 +690,6 @@
       (setq n *graph-node-count*)
       (setq *graph-dist* nil)
 
-      ;; build initial distance matrix
       (setq i 0)
       (repeat n
         (setq row nil)
@@ -341,7 +701,7 @@
               (setq ew (graph-get-edge-weight i j))
               (if ew
                 (setq row (cons ew row))
-                (setq row (cons 1e30 row))  ; infinity
+                (setq row (cons 1e30 row))
               )
             )
           )
@@ -352,44 +712,48 @@
       )
       (setq *graph-dist* (reverse *graph-dist*))
 
-      (princ "\n[graph-floyd] Running optimization...")
+      (if (null *graph-dist*)
+        (progn (princ "\n[graph-floyd] Error: distance matrix is nil.") nil)
+        (progn
+          (princ "\n[graph-floyd] Running optimization...")
 
-      ;; Floyd-Warshall triple loop
-      (setq k 0)
-      (repeat n
-        (if (= (rem k 50) 0)
-          (princ (strcat "\r[graph-floyd] Progress: "
-                         (itoa k) "/" (itoa n)))
-        )
-        (setq i 0)
-        (repeat n
-          (setq dist_ik (nth k (nth i *graph-dist*)))
-          (if (< dist_ik 1e29)
-            (progn
-              (setq j 0)
-              (repeat n
-                (setq dist_kj (nth j (nth k *graph-dist*)))
-                (if (< dist_kj 1e29)
-                  (progn
-                    (setq new_dist (+ dist_ik dist_kj))
-                    (setq dist_ij (nth j (nth i *graph-dist*)))
-                    (if (< new_dist dist_ij)
-                      (graph-update-matrix i j new_dist)
+          (setq k 0)
+          (repeat n
+            (if (= (rem k 50) 0)
+              (princ (strcat "\r[graph-floyd] Progress: "
+                             (itoa k) "/" (itoa n)))
+            )
+            (setq i 0)
+            (repeat n
+              (setq dist_ik (nth k (nth i *graph-dist*)))
+              (if (< dist_ik 1e29)
+                (progn
+                  (setq j 0)
+                  (repeat n
+                    (setq dist_kj (nth j (nth k *graph-dist*)))
+                    (if (< dist_kj 1e29)
+                      (progn
+                        (setq new_dist (+ dist_ik dist_kj))
+                        (setq dist_ij (nth j (nth i *graph-dist*)))
+                        (if (< new_dist dist_ij)
+                          (graph-update-matrix i j new_dist)
+                        )
+                      )
                     )
+                    (setq j (1+ j))
                   )
                 )
-                (setq j (1+ j))
               )
+              (setq i (1+ i))
             )
+            (setq k (1+ k))
           )
-          (setq i (1+ i))
-        )
-        (setq k (1+ k))
-      )
 
-      (setq *graph-floyd-done* T)
-      (princ (strcat "\n[graph-floyd] Done."))
-      T
+          (setq *graph-floyd-done* T)
+          (princ (strcat "\n[graph-floyd] Done."))
+          T
+        )
+      )
     )
   )
 )
@@ -431,20 +795,22 @@
 (defun graph-get-distance (nodeA nodeB / row)
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph] Error: Floyd-Warshall not computed.") nil)
-    (if (and (< nodeA *graph-node-count*)
-             (< nodeB *graph-node-count*)
-             *graph-dist*)
-      (progn
-        (setq row (nth nodeA *graph-dist*))
-        (if (and row (< nodeB (length row)))
-          (progn
-            (setq d (nth nodeB row))
-            (if (< d 1e29) d nil)
+    (if (null *graph-dist*)
+      (progn (princ "\n[graph] Error: distance matrix is nil.") nil)
+      (if (and (< nodeA *graph-node-count*)
+               (< nodeB *graph-node-count*))
+        (progn
+          (setq row (nth nodeA *graph-dist*))
+          (if (and row (< nodeB (length row)))
+            (progn
+              (setq d (nth nodeB row))
+              (if (< d 1e29) d nil)
+            )
+            nil
           )
-          nil
         )
+        nil
       )
-      nil
     )
   )
 )
@@ -461,6 +827,66 @@
   (if (and nA nB)
     (graph-get-distance nA nB)
     nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  graph-distance-via-edge
+;;;  Compute distance from a projection point to a target node
+;;;  via the two endpoints of the edge the projection lies on.
+;;;  This avoids needing to add the projection point as a new node
+;;;  and re-run Floyd-Warshall.
+;;;
+;;;  Formula: dist = proj_dist + min(
+;;;    graph_dist(ep1_node, target_node) + dist(proj_pt, ep1_pt),
+;;;    graph_dist(ep2_node, target_node) + dist(proj_pt, ep2_pt)
+;;;  )
+;;;
+;;;  Args: proj-pt   - projection point on the edge
+;;;         proj-dist - distance from original point to proj-pt
+;;;         edge-ent  - the LINE entity the projection lies on
+;;;         target-node - integer node index of the target
+;;;  Returns: float total distance or nil
+;;;---------------------------------------------------------------
+(defun graph-distance-via-edge (proj-pt proj-dist edge-ent target-node /
+                                 endpts ep1 ep2 ep1-node ep2-node
+                                 d1 d2 dist-via-ep1 dist-via-ep2)
+  (if (null edge-ent)
+    nil
+    (progn
+      (setq endpts (line-get-endpoints edge-ent))
+      (if (null endpts)
+        nil
+        (progn
+          (setq ep1 (car endpts))
+          (setq ep2 (cadr endpts))
+          (setq ep1-node (graph-get-node-index ep1))
+          (setq ep2-node (graph-get-node-index ep2))
+          (if (or (null ep1-node) (null ep2-node))
+            nil
+            (progn
+              (setq d1 (graph-get-distance ep1-node target-node))
+              (setq d2 (graph-get-distance ep2-node target-node))
+              (setq dist-via-ep1 nil)
+              (setq dist-via-ep2 nil)
+              (if (and d1 (< d1 1e29))
+                (setq dist-via-ep1 (+ proj-dist (distance proj-pt ep1) d1))
+              )
+              (if (and d2 (< d2 1e29))
+                (setq dist-via-ep2 (+ proj-dist (distance proj-pt ep2) d2))
+              )
+              (cond
+                ((and dist-via-ep1 dist-via-ep2)
+                 (min dist-via-ep1 dist-via-ep2))
+                (dist-via-ep1 dist-via-ep1)
+                (dist-via-ep2 dist-via-ep2)
+                (T nil)
+              )
+            )
+          )
+        )
+      )
+    )
   )
 )
 
@@ -489,8 +915,8 @@
         (setq ent (ssname line-ss i))
         (if ent
           (progn
-            (setq tmp-pt (vlax-curve-getClosestPointTo ent pt))
-            (if tmp-pt
+            (setq tmp-pt (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+            (if (and tmp-pt (not (vl-catch-all-error-p tmp-pt)))
               (progn
                 (setq tmp-dis (distance pt tmp-pt))
                 (if (< tmp-dis min-dis)
@@ -519,7 +945,7 @@
 ;;;         gllst  - optional DXF filter
 ;;;  Returns: (node-index projected-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun graph-project-point (pt line-ss gllst / nearest)
+(defun graph-project-point (pt line-ss gllst / nearest nidx)
   (setq nearest (graph-find-nearest-edge pt line-ss gllst))
   (if nearest
     (progn
@@ -554,35 +980,32 @@
   (if (null *graph-floyd-done*)
     (progn (princ "\n[graph-assign] Error: Run graph-floyd-compute first.") nil)
     (progn
-      ;; Step 1: Project devices to graph
       (princ "\n[graph-assign] Step 1: Projecting devices...")
       (setq dev-nodes nil)
       (foreach dp device-list
         (setq dev-info (graph-project-point dp nil nil))
-        (if dev-info
+        (if (and dev-info (= (length dev-info) 3) (numberp (car dev-info)))
           (setq dev-nodes (cons (cons dp dev-info) dev-nodes))
         )
       )
       (princ (strcat "\n[graph-assign] Projected " (itoa (length dev-nodes)) " devices"))
 
-      ;; Step 2: Project junctions to graph
       (princ "\n[graph-assign] Step 2: Projecting junctions...")
       (setq jnx-nodes nil)
       (foreach jp junction-list
         (setq jnx-info (graph-project-point jp nil nil))
-        (if jnx-info
+        (if (and jnx-info (= (length jnx-info) 3) (numberp (car jnx-info)))
           (setq jnx-nodes (cons (cons jp jnx-info) jnx-nodes))
         )
       )
       (princ (strcat "\n[graph-assign] Projected " (itoa (length jnx-nodes)) " junctions"))
 
-      ;; Step 3: Match each device to best junction
       (princ "\n[graph-assign] Step 3: Matching...")
       (setq result nil)
       (foreach dev-entry (reverse dev-nodes)
         (setq dev-pt (car dev-entry))
         (setq dev-info (cdr dev-entry))
-        (if (= (length dev-info) 3)
+        (if (and dev-info (= (length dev-info) 3))
           (progn
             (setq dev-node (car dev-info))
             (setq dev-dist (caddr dev-info))
@@ -592,7 +1015,7 @@
                 (foreach jnx-entry (reverse jnx-nodes)
                   (setq jnx-pt (car jnx-entry))
                   (setq jnx-info (cdr jnx-entry))
-                  (if (= (length jnx-info) 3)
+                  (if (and jnx-info (= (length jnx-info) 3))
                     (progn
                       (setq jnx-node (car jnx-info))
                       (setq jnx-dist (caddr jnx-info))
@@ -841,11 +1264,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M01_graph_algorithm.lsp
-;;;  Next: M02_line_utils.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M02 - Line Utilities Module
 ;;;  Utility functions for LINE entity operations
@@ -861,11 +1279,21 @@
 ;;;  Returns: (start-point end-point) or nil
 ;;;---------------------------------------------------------------
 (defun line-get-endpoints (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (if (= etype "LINE")
-    (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (null elist)
+        nil
+        (progn
+          (setq etype (cdr (assoc 0 elist)))
+          (if (= etype "LINE")
+            (list (cdr (assoc 10 elist)) (cdr (assoc 11 elist)))
+            nil
+          )
+        )
+      )
+    )
   )
 )
 
@@ -876,8 +1304,13 @@
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
 (defun line-get-startpoint (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 10 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 10 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -887,8 +1320,13 @@
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
 (defun line-get-endpoint (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 11 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 11 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -911,10 +1349,18 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: float length
 ;;;---------------------------------------------------------------
-(defun line-get-length-vl (ent)
+(defun line-get-length-vl (ent / result)
   (vl-load-com)
-  (- (vlax-curve-getDistAtParam ent (vlax-curve-getEndParam ent))
-     (vlax-curve-getDistAtParam ent (vlax-curve-getStartParam ent)))
+  (setq result (vl-catch-all-apply
+                 (function
+                   (lambda ()
+                     (- (vlax-curve-getDistAtParam ent (vlax-curve-getEndParam ent))
+                        (vlax-curve-getDistAtParam ent (vlax-curve-getStartParam ent)))))
+                 nil))
+  (if (vl-catch-all-error-p result)
+    nil
+    result
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -940,9 +1386,13 @@
 ;;;         pt  - point list
 ;;;  Returns: point on line, or nil
 ;;;---------------------------------------------------------------
-(defun line-get-closest-point (ent pt)
+(defun line-get-closest-point (ent pt / result)
   (vl-load-com)
-  (vlax-curve-getClosestPointTo ent pt)
+  (setq result (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+  (if (vl-catch-all-error-p result)
+    nil
+    result
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -967,12 +1417,15 @@
 ;;;         dist     - distance from start
 ;;;  Returns: point or nil
 ;;;---------------------------------------------------------------
-(defun line-point-at-distance (ent dist / param)
+(defun line-point-at-distance (ent dist / param pt)
   (vl-load-com)
   (setq param (vlax-curve-getParamAtDist ent dist))
-  (if param
-    (vlax-curve-getPointAtParam ent param)
+  (if (null param)
     nil
+    (progn
+      (setq pt (vlax-curve-getPointAtParam ent param))
+      (if (null pt) nil pt)
+    )
   )
 )
 
@@ -985,9 +1438,9 @@
 ;;;---------------------------------------------------------------
 (defun line-distance-at-point (ent pt / cpt)
   (setq cpt (line-get-closest-point ent pt))
-  (if cpt
-    (vlax-curve-getDistAtPoint ent cpt)
+  (if (null cpt)
     nil
+    (vlax-curve-getDistAtPoint ent cpt)
   )
 )
 
@@ -999,31 +1452,36 @@
 ;;;---------------------------------------------------------------
 (defun lines-get-intersection (ent1 ent2 / obj1 obj2 int-arr n pts k pt)
   (vl-load-com)
-  (setq obj1 (vlax-ename->vla-object ent1))
-  (setq obj2 (vlax-ename->vla-object ent2))
-  (if (and obj1 obj2)
+  (if (or (null ent1) (null ent2))
+    nil
     (progn
-      (setq int-arr (vl-catch-all-apply
-                      'vlax-safearray->list
-                      (list (vlax-variant-value
-                              (vla-intersectwith obj1 obj2 acExtendNone)))))
-      (if (and int-arr (not (vl-catch-all-error-p int-arr)))
+      (setq obj1 (vlax-ename->vla-object ent1))
+      (setq obj2 (vlax-ename->vla-object ent2))
+      (if (and obj1 obj2)
         (progn
-          (setq n (/ (length int-arr) 3))
-          (setq pts nil k 0)
-          (repeat n
-            (setq pt (list (nth (* k 3) int-arr)
-                           (nth (1+ (* k 3)) int-arr)
-                           0.0))
-            (setq pts (cons pt pts))
-            (setq k (1+ k))
+          (setq int-arr (vl-catch-all-apply
+                          'vlax-safearray->list
+                          (list (vlax-variant-value
+                                  (vla-intersectwith obj1 obj2 acExtendNone)))))
+          (if (and int-arr (not (vl-catch-all-error-p int-arr)))
+            (progn
+              (setq n (/ (length int-arr) 3))
+              (setq pts nil k 0)
+              (repeat n
+                (setq pt (list (nth (* k 3) int-arr)
+                               (nth (1+ (* k 3)) int-arr)
+                               0.0))
+                (setq pts (cons pt pts))
+                (setq k (1+ k))
+              )
+              (reverse pts)
+            )
+            nil
           )
-          (reverse pts)
         )
         nil
       )
     )
-    nil
   )
 )
 
@@ -1097,9 +1555,7 @@
       (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
       (setq dx (- x2 x1))
       (if (< (abs dx) 1e-10)
-        ;; vertical line: slope = nil, intercept = x value
         (list nil x1)
-        ;; normal line
         (progn
           (setq k (/ (- y2 y1) dx))
           (list k (- y1 (* k x1)))
@@ -1138,7 +1594,7 @@
   (setq dy (- (cadr p2) (cadr p1)))
   (setq len2 (+ (* dx dx) (* dy dy)))
   (if (< len2 1e-20)
-    p1  ; degenerate segment
+    p1
     (progn
       (setq t-param (/ (+ (* (- (car pt) (car p1)) dx)
                           (* (- (cadr pt) (cadr p1)) dy))
@@ -1163,8 +1619,13 @@
 ;;;  Returns: string layer name
 ;;;---------------------------------------------------------------
 (defun line-get-layer (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 8 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 8 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -1175,8 +1636,13 @@
 ;;;  Returns: modified entity (from entmod)
 ;;;---------------------------------------------------------------
 (defun line-set-layer (ent name / elist)
-  (setq elist (entget ent))
-  (entmod (subst (cons 8 name) (assoc 8 elist) elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (entmod (subst (cons 8 name) (assoc 8 elist) elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -1185,12 +1651,8 @@
 ;;;  Args: p1, p2 - point lists
 ;;;  Returns: entity name of new line
 ;;;---------------------------------------------------------------
-(defun line-create (p1 p2 / old-cmdecho ent)
-  (setq old-cmdecho (getvar "cmdecho"))
-  (setvar "cmdecho" 0)
-  (command-s "_.line" "_non" (trans p1 0 1) "_non" (trans p2 0 1) "")
-  (setq ent (entlast))
-  (setvar "cmdecho" old-cmdecho)
+(defun line-create (p1 p2 / ent)
+  (setq ent (entmakex (list (cons 0 "LINE") (cons 10 p1) (cons 11 p2))))
   ent
 )
 
@@ -1201,11 +1663,8 @@
 ;;;         layer - layer name string
 ;;;  Returns: entity name
 ;;;---------------------------------------------------------------
-(defun line-create-on-layer (p1 p2 layer / old-layer ent)
-  (setq old-layer (getvar "clayer"))
-  (setvar "clayer" layer)
-  (setq ent (line-create p1 p2))
-  (setvar "clayer" old-layer)
+(defun line-create-on-layer (p1 p2 layer / ent)
+  (setq ent (entmakex (list (cons 0 "LINE") (cons 8 layer) (cons 10 p1) (cons 11 p2))))
   ent
 )
 
@@ -1423,11 +1882,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M02_line_utils.lsp
-;;;  Next: M03_mline_converter.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M03 - MLINE Converter Module
 ;;;  Convert MLINE entities to LINE entities with endpoint connection
@@ -1449,18 +1903,22 @@
 ;;;  Returns: list of points or nil
 ;;;---------------------------------------------------------------
 (defun mline-get-vertices (ent / elist pts i n)
-  (setq elist (entget ent))
-  (setq pts nil)
-  (setq i 0)
-  (setq n (length elist))
-  ;; MLINE vertices are stored in group code 11
-  (repeat n
-    (if (= (car (nth i elist)) 11)
-      (setq pts (cons (cdr (nth i elist)) pts))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq pts nil)
+      (setq i 0)
+      (setq n (length elist))
+      (repeat n
+        (if (= (car (nth i elist)) 11)
+          (setq pts (cons (cdr (nth i elist)) pts))
+        )
+        (setq i (1+ i))
+      )
+      (reverse pts)
     )
-    (setq i (1+ i))
   )
-  (reverse pts)
 )
 
 ;;;---------------------------------------------------------------
@@ -1470,24 +1928,29 @@
 ;;;         layer - target layer name (nil = current layer)
 ;;;  Returns: selection set of created lines
 ;;;---------------------------------------------------------------
-(defun mline-convert-to-lines (ent layer / pts i n ss old-layer)
-  (setq pts (mline-get-vertices ent))
-  (setq ss (ssadd))
-  (if (and pts (> (length pts) 1))
+(defun mline-convert-to-lines (ent layer / pts i n ss new-ent)
+  (if (null ent)
     (progn
-      (setq old-layer (getvar "clayer"))
-      (if layer (setvar "clayer" layer))
-      (setq i 0)
-      (setq n (1- (length pts)))
-      (repeat n
-        (command-s "_.line" (nth i pts) (nth (1+ i) pts) "")
-        (setq ss (ssadd (entlast) ss))
-        (setq i (1+ i))
+      (setq ss (ssadd))
+      ss
+    )
+    (progn
+      (setq pts (mline-get-vertices ent))
+      (setq ss (ssadd))
+      (if (and pts (> (length pts) 1))
+        (progn
+          (setq i 0)
+          (setq n (1- (length pts)))
+          (repeat n
+            (setq new-ent (entmakex (list (cons 0 "LINE") (cons 8 (if layer layer (getvar "clayer"))) (cons 10 (nth i pts)) (cons 11 (nth (1+ i) pts)))))
+            (if new-ent (setq ss (ssadd new-ent ss)))
+            (setq i (1+ i))
+          )
+        )
       )
-      (if layer (setvar "clayer" old-layer))
+      ss
     )
   )
-  ss
 )
 
 ;;;---------------------------------------------------------------
@@ -1552,14 +2015,15 @@
 ;;;         gllst - optional DXF filter for line selection
 ;;;  Returns: selection set of nearby lines
 ;;;---------------------------------------------------------------
-(defun mline-find-nearby-lines (pt radius gllst / pt1 pt2 filter)
+(defun mline-find-nearby-lines (pt radius gllst / pt1 pt2 filter ss)
   (setq pt1 (polar pt (* pi 0.75) radius))
   (setq pt2 (polar pt (* pi -0.25) radius))
   (setq filter (list (cons 0 "LINE")))
   (if gllst
     (setq filter (append filter gllst))
   )
-  (ssget "_c" pt1 pt2 filter)
+  (setq ss (ssget "_c" pt1 pt2 filter))
+  (if (null ss) nil ss)
 )
 
 ;;;---------------------------------------------------------------
@@ -1569,27 +2033,22 @@
 ;;;  Returns: T if proper intersection, nil otherwise
 ;;;---------------------------------------------------------------
 (defun mline-check-intersect (ent1 ent2 / pts1 pts2 int-pts ep1 ep2 tol is-endpoint-p found)
-  ;; Check if two lines have a proper crossing (not just touching at endpoints)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
-  (setq int-pts (lines-get-intersection ent1 ent2))
-  (if (null int-pts)
-    nil  ; no intersection at all
+  (setq int-pts (vl-catch-all-apply 'lines-get-intersection (list ent1 ent2)))
+  (if (or (null int-pts) (vl-catch-all-error-p int-pts))
+    nil
     (progn
       (setq tol 1.0)
-      ;; Collect all 4 endpoints
       (setq ep1 (list (car pts1) (cadr pts1)))
       (setq ep2 (list (car pts2) (cadr pts2)))
-      ;; Check if any intersection point is NOT at an endpoint
-      ;; If so, the lines properly cross each other
       (setq found nil)
       (foreach ipt int-pts
-        ;; Check if this intersection is near any endpoint
         (if (and (not (< (distance ipt (car pts1)) tol))
                  (not (< (distance ipt (cadr pts1)) tol))
                  (not (< (distance ipt (car pts2)) tol))
                  (not (< (distance ipt (cadr pts2)) tol)))
-          (setq found T)  ; intersection is NOT at any endpoint = proper crossing
+          (setq found T)
         )
       )
       found
@@ -1606,7 +2065,7 @@
 ;;;         gllst - filter for line selection
 ;;;  Returns: T if connection made, nil otherwise
 ;;;---------------------------------------------------------------
-(defun mline-connect-endpoint (line-ent endpoint threshold gllst / pt nearby-lines i near-ent near-pts closest-pt min-dist closest-ent)
+(defun mline-connect-endpoint (line-ent endpoint threshold gllst / pt nearby-lines i near-ent near-pts closest-pt min-dist closest-ent proj-pt d)
   (setq pt (if (= endpoint 'start)
              (line-get-startpoint line-ent)
              (line-get-endpoint line-ent)
@@ -1614,7 +2073,6 @@
   (setq nearby-lines (mline-find-nearby-lines pt threshold gllst))
   (if nearby-lines
     (progn
-      ;; Remove self from selection
       (setq nearby-lines (ssdel line-ent nearby-lines))
       (if (> (sslength nearby-lines) 0)
         (progn
@@ -1624,7 +2082,6 @@
           (repeat (sslength nearby-lines)
             (setq near-ent (ssname nearby-lines i))
             (setq near-pts (line-get-endpoints near-ent))
-            ;; Check both endpoints of nearby line
             (foreach np near-pts
               (setq d (distance pt np))
               (if (< d min-dist)
@@ -1637,20 +2094,15 @@
             )
             (setq i (1+ i))
           )
-          ;; If found close endpoint and no proper intersection, create connection
           (if (and closest-pt
                    (not (mline-check-intersect line-ent closest-ent)))
             (progn
-              ;; Get closest point on the nearby line
-              (setq proj-pt (line-get-closest-point closest-ent pt))
-              (if proj-pt
+              (setq proj-pt (vl-catch-all-apply 'line-get-closest-point (list closest-ent pt)))
+              (if (and proj-pt (not (vl-catch-all-error-p proj-pt)))
                 (progn
-                  ;; Create connection line
-                  (command-s "_.line" pt proj-pt "")
-                  ;; Check if zero length and delete if so
-                  (setq new-ent (entlast))
-                  (if (= 0 (line-get-length new-ent))
-                    (command-s "_.erase" new-ent "")
+                  (setq new-ent (entmakex (list (cons 0 "LINE") (cons 10 pt) (cons 11 proj-pt))))
+                  (if (and new-ent (= 0 (line-get-length new-ent)))
+                    (entdel new-ent)
                   )
                   T
                 )
@@ -1711,32 +2163,29 @@
 ;;;  Returns: selection set of all created lines
 ;;;---------------------------------------------------------------
 (defun mline-process-all (mline-layer-list target-layer connect-threshold gllst / mline-ss all-lines count)
-  (princ (strcat "\n[mline] Processing MLINEs on layers: " 
-                 (if (listp mline-layer-list) 
+  (princ (strcat "\n[mline] Processing MLINEs on layers: "
+                 (if (listp mline-layer-list)
                    (apply 'strcat (mapcar '(lambda (x) (strcat x ",")) mline-layer-list))
                    mline-layer-list)))
-  
-  ;; Get MLINEs
+
   (setq mline-ss (mline-get-all-on-layer mline-layer-list))
-  
+
   (if (null mline-ss)
     (progn
       (princ "\n[mline] No MLINEs found.")
       nil
     )
     (progn
-      ;; Convert to lines
       (princ (strcat "\n[mline] Converting " (itoa (sslength mline-ss)) " MLINEs..."))
       (setq all-lines (mline-convert-selection mline-ss target-layer))
-      
-      ;; Connect endpoints
+
       (if (null connect-threshold)
         (setq connect-threshold *mline-connect-threshold*)
       )
       (princ (strcat "\n[mline] Connecting endpoints within " (rtos connect-threshold 2 0) " units..."))
       (setq count (mline-connect-all-endpoints all-lines connect-threshold gllst))
       (princ (strcat "\n[mline] Created " (itoa count) " connection lines."))
-      
+
       (princ (strcat "\n[mline] Done. Total lines: " (itoa (sslength all-lines))))
       all-lines
     )
@@ -1869,8 +2318,8 @@
   (setq old-thresh (mline-get-threshold))
   (mline-set-threshold 2000.0)
   (if (= (mline-get-threshold) 2000.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (mline-set-threshold old-thresh)  ; restore
     )
@@ -1899,23 +2348,18 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M03_mline_converter.lsp
-;;;  Next: M04_duplicate_remover.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M04 - Duplicate Remover Module
 ;;;  Remove duplicate and overlapping line entities
+;;;  Optimized: spatial hash, endpoint hash, entmake
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M02 (line_utils.lsp)
+;;;  DEPENDENCIES: M00 (spatial_index.lsp), M02 (line_utils.lsp)
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
-;;;  *dup-tolerance* - Distance tolerance for duplicate detection
 (setq *dup-tolerance* 1.0)
 
 ;;;---------------------------------------------------------------
@@ -1934,9 +2378,36 @@
       (setq min-y (min y1 y2))
       (setq dx (- x2 x1))
       (setq dy (- y2 y1))
-      ;; Handle vertical lines
       (if (< (abs dx) 1e-10)
-        (list nil x1 min-x min-y)  ; nil slope = vertical
+        (list nil x1 min-x min-y)
+        (progn
+          (setq slope (/ dy dx))
+          (setq intercept (- y1 (* slope x1)))
+          (list slope intercept min-x min-y)
+        )
+      )
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-line-get-key-from-pts
+;;;  Generate sort key from pre-computed endpoints (avoids entget)
+;;;  Args: pts - (pt1 pt2)
+;;;  Returns: (slope intercept min-x min-y) or nil
+;;;---------------------------------------------------------------
+(defun dup-line-get-key-from-pts (pts / x1 y1 x2 y2 dx dy slope intercept min-x min-y)
+  (if (and pts (= (length pts) 2))
+    (progn
+      (setq x1 (car (car pts)) y1 (cadr (car pts)))
+      (setq x2 (car (cadr pts)) y2 (cadr (cadr pts)))
+      (setq min-x (min x1 x2))
+      (setq min-y (min y1 y2))
+      (setq dx (- x2 x1))
+      (setq dy (- y2 y1))
+      (if (< (abs dx) 1e-10)
+        (list nil x1 min-x min-y)
         (progn
           (setq slope (/ dy dx))
           (setq intercept (- y1 (* slope x1)))
@@ -1957,22 +2428,47 @@
 (defun dup-lines-colinear-p (ent1 ent2 / key1 key2)
   (setq key1 (dup-line-get-key ent1))
   (setq key2 (dup-line-get-key ent2))
+  (dup-keys-colinear-p key1 key2)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-keys-colinear-p
+;;;  Check if two keys represent colinear lines
+;;;  Args: key1, key2 - sort keys from dup-line-get-key
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun dup-keys-colinear-p (key1 key2 / tol)
+  (setq tol *dup-tolerance*)
   (if (and key1 key2)
-    (progn
-      ;; Check slope (handle nil for vertical)
+    (if (or (and (null (car key1)) (null (car key2)))
+            (and (car key1) (car key2)
+                 (< (abs (- (car key1) (car key2))) 0.001)))
       (if (or (and (null (car key1)) (null (car key2)))
-              (and (car key1) (car key2) 
-                   (< (abs (- (car key1) (car key2))) 0.001)))
-        ;; Check intercept
-        (if (or (and (null (car key1)) (null (car key2)))
-                (< (abs (- (cadr key1) (cadr key2))) *dup-tolerance*))
-          T
-          nil
-        )
+              (< (abs (- (cadr key1) (cadr key2))) tol))
+        T
         nil
       )
+      nil
     )
     nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-key-to-hash
+;;;  Convert a line key to a hash string for grouping
+;;;  Quantizes slope and intercept for approximate matching
+;;;  Args: key - (slope intercept min-x min-y)
+;;;  Returns: string hash like "S0.000_I0.0" or "V_1000.0"
+;;;---------------------------------------------------------------
+(defun dup-key-to-hash (key / slope-quant intercept-quant)
+  (if (null (car key))
+    (strcat "V_" (rtos (cadr key) 2 0))
+    (progn
+      (setq slope-quant (rtos (car key) 2 3))
+      (setq intercept-quant (rtos (cadr key) 2 0))
+      (strcat "S" slope-quant "_I" intercept-quant)
+    )
   )
 )
 
@@ -1995,23 +2491,6 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  dup-boxes-overlap-p
-;;;  Check if two bounding boxes overlap
-;;;  Args: box1, box2 - bounding boxes
-;;;  Returns: T or nil
-;;;---------------------------------------------------------------
-(defun dup-boxes-overlap-p (box1 box2 / tol)
-  (setq tol *dup-tolerance*)
-  (if (and box1 box2)
-    (not (or (< (nth 2 box1) (- (nth 0 box2) tol))  ; box1 right < box2 left
-             (< (nth 2 box2) (- (nth 0 box1) tol))  ; box2 right < box1 left
-             (< (nth 3 box1) (- (nth 1 box2) tol))  ; box1 top < box2 bottom
-             (< (nth 3 box2) (- (nth 1 box1) tol)))) ; box2 top < box1 bottom
-    nil
-  )
-)
-
-;;;---------------------------------------------------------------
 ;;;  dup-lines-overlap-p
 ;;;  Check if two colinear lines overlap
 ;;;  Args: ent1, ent2 - entity names (assumed colinear)
@@ -2020,40 +2499,51 @@
 (defun dup-lines-overlap-p (ent1 ent2 / box1 box2)
   (setq box1 (dup-line-bounding-box ent1))
   (setq box2 (dup-line-bounding-box ent2))
-  (dup-boxes-overlap-p box1 box2)
+  (sp-boxes-overlap-p box1 box2 *dup-tolerance*)
 )
 
 ;;;---------------------------------------------------------------
 ;;;  dup-merge-two-lines
-;;;  Merge two overlapping colinear lines into one
+;;;  Merge two overlapping colinear lines into one using entmake
 ;;;  Args: ent1, ent2 - entity names
+;;;         layer - target layer (nil = use ent1's layer)
 ;;;  Returns: entity name of merged line (or nil)
 ;;;---------------------------------------------------------------
-(defun dup-merge-two-lines (ent1 ent2 / pts1 pts2 all-pts min-x max-x min-y max-y new-ent)
+(defun dup-merge-two-lines (ent1 ent2 / pts1 pts2 all-pts min-x max-x min-y max-y
+                                      dx1 dy1 elist layer new-ent p1 p2)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
   (if (and pts1 pts2)
     (progn
-      ;; Collect all 4 endpoints
       (setq all-pts (append pts1 pts2))
-      ;; Find extreme points
       (setq min-x (apply 'min (mapcar 'car all-pts)))
       (setq max-x (apply 'max (mapcar 'car all-pts)))
       (setq min-y (apply 'min (mapcar 'cadr all-pts)))
       (setq max-y (apply 'max (mapcar 'cadr all-pts)))
-      ;; Determine orientation from original line
       (setq dx1 (- (car (cadr pts1)) (car (car pts1))))
       (setq dy1 (- (cadr (cadr pts1)) (cadr (car pts1))))
-      ;; Create new line based on orientation
       (if (> (abs dx1) (abs dy1))
-        ;; More horizontal: use x extremes
-        (setq new-ent (line-create (list min-x (cadr (car pts1)) 0.0)
-                                   (list max-x (cadr (car pts1)) 0.0)))
-        ;; More vertical or diagonal: use y extremes
-        (setq new-ent (line-create (list (car (car pts1)) min-y 0.0)
-                                   (list (car (car pts1)) max-y 0.0)))
+        (progn
+          (setq p1 (list min-x (cadr (car pts1)) 0.0))
+          (setq p2 (list max-x (cadr (car pts1)) 0.0))
+        )
+        (progn
+          (setq p1 (list (car (car pts1)) min-y 0.0))
+          (setq p2 (list (car (car pts1)) max-y 0.0))
+        )
       )
-      ;; Delete original lines
+      (setq elist (entget ent1))
+      (setq layer (cdr (assoc 8 elist)))
+      (setq new-ent
+        (entmakex
+          (list
+            (cons 0 "LINE")
+            (cons 8 layer)
+            (cons 10 p1)
+            (cons 11 p2)
+          )
+        )
+      )
       (entdel ent1)
       (entdel ent2)
       new-ent
@@ -2071,13 +2561,21 @@
 (defun dup-lines-identical-p (ent1 ent2 / pts1 pts2 tol)
   (setq pts1 (line-get-endpoints ent1))
   (setq pts2 (line-get-endpoints ent2))
+  (dup-pts-identical-p pts1 pts2)
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-pts-identical-p
+;;;  Check if two endpoint pairs are identical
+;;;  Args: pts1, pts2 - (start end) point lists
+;;;  Returns: T or nil
+;;;---------------------------------------------------------------
+(defun dup-pts-identical-p (pts1 pts2 / tol)
   (setq tol *dup-tolerance*)
   (if (and pts1 pts2)
     (or
-      ;; Same direction
       (and (< (distance (car pts1) (car pts2)) tol)
            (< (distance (cadr pts1) (cadr pts2)) tol))
-      ;; Reversed direction
       (and (< (distance (car pts1) (cadr pts2)) tol)
            (< (distance (cadr pts1) (car pts2)) tol))
     )
@@ -2086,39 +2584,96 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  dup-remove-identical
-;;;  Remove identical lines from selection set
-;;;  Args: line-ss - selection set
-;;;  Returns: number of duplicates removed
+;;;  dup-endpoint-hash
+;;;  Create a hash string from sorted endpoint coordinates
+;;;  Used for O(1) duplicate lookup instead of O(n) comparison
+;;;  Args: pts - (pt1 pt2) endpoint list
+;;;  Returns: string hash "x1,y1,x2,y2" (sorted by x then y)
 ;;;---------------------------------------------------------------
-(defun dup-remove-identical (line-ss / i j ent1 ent2 count to-remove)
-  (setq count 0)
-  (setq to-remove nil)
+(defun dup-endpoint-hash (pts / p1 p2 x1 y1 x2 y2 tol-quant)
+  (setq tol-quant (fix (/ 1.0 *dup-tolerance*)))
+  (setq p1 (car pts))
+  (setq p2 (cadr pts))
+  (setq x1 (car p1) y1 (cadr p1))
+  (setq x2 (car p2) y2 (cadr p2))
+  (if (or (< x1 x2) (and (= x1 x2) (< y1 y2)))
+    (strcat (rtos (fix (* x1 tol-quant)) 2 0) ","
+            (rtos (fix (* y1 tol-quant)) 2 0) ","
+            (rtos (fix (* x2 tol-quant)) 2 0) ","
+            (rtos (fix (* y2 tol-quant)) 2 0))
+    (strcat (rtos (fix (* x2 tol-quant)) 2 0) ","
+            (rtos (fix (* y2 tol-quant)) 2 0) ","
+            (rtos (fix (* x1 tol-quant)) 2 0) ","
+            (rtos (fix (* y1 tol-quant)) 2 0))
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-build-line-records
+;;;  Pre-compute endpoints, bounding boxes, and keys for all lines
+;;;  Avoids repeated entget calls during comparison
+;;;  Args: line-ss - selection set of lines
+;;;  Returns: list of (ent pts box key hash)
+;;;---------------------------------------------------------------
+(defun dup-build-line-records (line-ss / i ent pts box key hash records)
+  (setq records nil)
   (if line-ss
     (progn
       (setq i 0)
       (repeat (sslength line-ss)
-        (setq ent1 (ssname line-ss i))
-        (if (and ent1 (not (member ent1 to-remove)))
+        (setq ent (ssname line-ss i))
+        (if ent
           (progn
-            (setq j (1+ i))
-            (repeat (- (sslength line-ss) (1+ i))
-              (setq ent2 (ssname line-ss j))
-              (if (and ent2 (not (member ent2 to-remove)))
-                (if (dup-lines-identical-p ent1 ent2)
-                  (progn
-                    (setq to-remove (cons ent2 to-remove))
-                    (setq count (1+ count))
-                  )
-                )
+            (setq pts (line-get-endpoints ent))
+            (setq box (sp-box-from-pts pts))
+            (setq key (dup-line-get-key-from-pts pts))
+            (setq hash (if pts (dup-endpoint-hash pts) nil))
+            (setq records (cons (list ent pts box key hash) records))
+          )
+        )
+        (setq i (1+ i))
+      )
+      (reverse records)
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  dup-remove-identical
+;;;  Remove identical lines using endpoint hash for O(n) lookup
+;;;  Falls back to spatial-indexed comparison for near-duplicates
+;;;  Args: line-ss - selection set
+;;;  Returns: number of duplicates removed
+;;;---------------------------------------------------------------
+(defun dup-remove-identical (line-ss / records hash-table i rec ent pts hash
+                                       existing to-remove count)
+  (setq count 0)
+  (setq to-remove nil)
+  (if line-ss
+    (progn
+      (setq records (dup-build-line-records line-ss))
+      (setq hash-table nil)
+      (setq i 0)
+      (repeat (length records)
+        (setq rec (nth i records))
+        (setq ent (car rec))
+        (setq pts (cadr rec))
+        (setq hash (nth 4 rec))
+        (if (and hash (not (member ent to-remove)))
+          (progn
+            (setq existing (assoc hash hash-table))
+            (if existing
+              (progn
+                (setq to-remove (cons ent to-remove))
+                (setq count (1+ count))
               )
-              (setq j (1+ j))
+              (setq hash-table (cons (cons hash ent) hash-table))
             )
           )
         )
         (setq i (1+ i))
       )
-      ;; Delete marked entities
       (foreach ent to-remove
         (if (entget ent) (entdel ent))
       )
@@ -2129,46 +2684,81 @@
 
 ;;;---------------------------------------------------------------
 ;;;  dup-merge-colinear
-;;;  Merge overlapping colinear lines
+;;;  Merge overlapping colinear lines using spatial hash grouping
+;;;  Groups lines by quantized slope/intercept, then only compares
+;;;  within groups and within spatial cells
 ;;;  Args: line-ss - selection set
 ;;;  Returns: number of merges performed
 ;;;---------------------------------------------------------------
-(defun dup-merge-colinear (line-ss / line-list i j ent1 ent2 count merged)
+(defun dup-merge-colinear (line-ss / records groups i rec key hash
+                                    group-key group-records
+                                    idx j k r1 r2 ent1 ent2
+                                    count merged new-ent)
   (setq count 0)
   (setq merged nil)
   (if line-ss
     (progn
-      ;; Convert to list for easier manipulation
-      (setq line-list nil)
+      (setq records (dup-build-line-records line-ss))
+      (setq groups nil)
       (setq i 0)
-      (repeat (sslength line-ss)
-        (setq line-list (cons (ssname line-ss i) line-list))
+      (repeat (length records)
+        (setq rec (nth i records))
+        (setq key (nth 3 rec))
+        (if key
+          (progn
+            (setq hash (dup-key-to-hash key))
+            (setq group-key (assoc hash groups))
+            (if group-key
+              (setq groups
+                (subst (cons hash (cons i (cdr group-key))) group-key groups))
+              (setq groups (cons (list hash i) groups))
+            )
+          )
+        )
         (setq i (1+ i))
       )
-      (setq line-list (reverse line-list))
-      ;; Check each pair
-      (setq i 0)
-      (while (< i (length line-list))
-        (setq ent1 (nth i line-list))
-        (if (and ent1 (entget ent1) (not (member ent1 merged)))
+      (foreach grp groups
+        (setq group-records (cdr grp))
+        (if (> (length group-records) 1)
           (progn
-            (setq j (1+ i))
-            (while (< j (length line-list))
-              (setq ent2 (nth j line-list))
-              (if (and ent2 (entget ent2) (not (member ent2 merged)))
-                (if (and (dup-lines-colinear-p ent1 ent2)
-                         (dup-lines-overlap-p ent1 ent2))
-                  (progn
-                    ;; Merge lines
-                    (setq new-ent (dup-merge-two-lines ent1 ent2))
-                    (if new-ent
+            (setq idx (sp-build-index
+                        (mapcar '(lambda (ri) (nth ri records)) group-records)
+                        '(lambda (r) (caddr r))
+                        (sp-get-cell-size)))
+            (setq j 0)
+            (while (< j (length group-records))
+              (setq r1 (nth (nth j group-records) records))
+              (setq ent1 (car r1))
+              (if (and ent1 (entget ent1) (not (member ent1 merged)))
+                (progn
+                  (setq candidates (sp-get-candidates (caddr r1) idx (sp-get-cell-size)))
+                  (foreach ci candidates
+                    (if (/= ci j)
                       (progn
-                        (setq merged (cons ent1 merged))
-                        (setq merged (cons ent2 merged))
-                        ;; Replace in list with new entity
-                        (setq line-list (subst new-ent ent1 line-list))
-                        (setq ent1 new-ent)
-                        (setq count (1+ count))
+                        (setq r2 (nth (nth ci group-records) records))
+                        (setq ent2 (car r2))
+                        (if (and ent2 (entget ent2) (not (member ent2 merged)))
+                          (if (and (dup-keys-colinear-p (nth 3 r1) (nth 3 r2))
+                                   (sp-boxes-overlap-p (caddr r1) (caddr r2) *dup-tolerance*))
+                            (progn
+                              (setq new-ent (dup-merge-two-lines ent1 ent2))
+                              (if new-ent
+                                (progn
+                                  (setq merged (cons ent1 merged))
+                                  (setq merged (cons ent2 merged))
+                                  (setq r1
+                                    (list new-ent
+                                          (line-get-endpoints new-ent)
+                                          (dup-line-bounding-box new-ent)
+                                          (dup-line-get-key new-ent)
+                                          nil))
+                                  (setq ent1 new-ent)
+                                  (setq count (1+ count))
+                                )
+                              )
+                            )
+                          )
+                        )
                       )
                     )
                   )
@@ -2178,7 +2768,6 @@
             )
           )
         )
-        (setq i (1+ i))
       )
     )
   )
@@ -2194,8 +2783,7 @@
 ;;;---------------------------------------------------------------
 (defun dup-remove-all (line-ss layer / ss identical-count colinear-count)
   (princ "\n[dup] Removing duplicate lines...")
-  
-  ;; Get lines if not provided
+
   (if (null line-ss)
     (if layer
       (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer))))
@@ -2203,7 +2791,7 @@
     )
     (setq ss line-ss)
   )
-  
+
   (if (null ss)
     (progn
       (princ "\n[dup] No lines found.")
@@ -2211,21 +2799,18 @@
     )
     (progn
       (princ (strcat "\n[dup] Processing " (itoa (sslength ss)) " lines..."))
-      
-      ;; Step 1: Remove identical lines
+
       (setq identical-count (dup-remove-identical ss))
       (princ (strcat "\n[dup] Removed " (itoa identical-count) " identical lines."))
-      
-      ;; Refresh selection set
+
       (if layer
         (setq ss (ssget "x" (list (cons 0 "LINE") (cons 8 layer))))
         (setq ss (ssget "x" '((0 . "LINE"))))
       )
-      
-      ;; Step 2: Merge colinear overlapping lines
+
       (setq colinear-count (dup-merge-colinear ss))
       (princ (strcat "\n[dup] Merged " (itoa colinear-count) " colinear lines."))
-      
+
       (princ "\n[dup] Done.")
       (list identical-count colinear-count)
     )
@@ -2262,28 +2847,26 @@
 
   (command-s "_.undo" "_be")
 
-  ;; Test 1: dup-line-get-key
   (princ "\n[Test 1] dup-line-get-key...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
   (setq key (dup-line-get-key ent1))
   (if (and key
-           (< (abs (- (car key) 0.0)) 0.001)    ; slope = 0
-           (< (abs (- (cadr key) 0.0)) 0.001))  ; intercept = 0
+           (< (abs (- (car key) 0.0)) 0.001)
+           (< (abs (- (cadr key) 0.0)) 0.001))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
   (command-s "_.erase" ent1 "")
 
-  ;; Test 2: dup-lines-identical-p
   (princ "\n[Test 2] dup-lines-identical-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; identical
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "1000,0" "0,0" "")  ; reversed
+  (command-s "_.line" "1000,0" "0,0" "")
   (setq ent3 (entlast))
-  (command-s "_.line" "0,0" "1000,100" "")  ; different
+  (command-s "_.line" "0,0" "1000,100" "")
   (setq ent4 (entlast))
   (if (and (dup-lines-identical-p ent1 ent2)
            (dup-lines-identical-p ent1 ent3)
@@ -2296,13 +2879,12 @@
   (command-s "_.erase" ent3 "")
   (command-s "_.erase" ent4 "")
 
-  ;; Test 3: dup-lines-colinear-p
   (princ "\n[Test 3] dup-lines-colinear-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; colinear
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "0,0" "1000,100" "")  ; not colinear
+  (command-s "_.line" "0,0" "1000,100" "")
   (setq ent3 (entlast))
   (if (and (dup-lines-colinear-p ent1 ent2)
            (null (dup-lines-colinear-p ent1 ent3)))
@@ -2313,13 +2895,12 @@
   (command-s "_.erase" ent2 "")
   (command-s "_.erase" ent3 "")
 
-  ;; Test 4: dup-lines-overlap-p
   (princ "\n[Test 4] dup-lines-overlap-p...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlaps
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "1100,0" "2000,0" "")  ; does not overlap
+  (command-s "_.line" "1100,0" "2000,0" "")
   (setq ent3 (entlast))
   (if (and (dup-lines-overlap-p ent1 ent2)
            (null (dup-lines-overlap-p ent1 ent3)))
@@ -2330,37 +2911,33 @@
   (command-s "_.erase" ent2 "")
   (command-s "_.erase" ent3 "")
 
-  ;; Test 5: dup-remove-identical
   (princ "\n[Test 5] dup-remove-identical...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; duplicate
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; another duplicate
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent3 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq ss (ssadd ent3 ss))
   (setq count (dup-remove-identical ss))
-  (if (= count 2)  ; should remove 2 duplicates
+  (if (= count 2)
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup remaining line
   (if (entget ent1) (command-s "_.erase" ent1 ""))
 
-  ;; Test 6: dup-merge-colinear
   (princ "\n[Test 6] dup-merge-colinear...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlaps
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent2 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq count (dup-merge-colinear ss))
-  ;; After merge, should have 1 line spanning 0-1500
   (setq remaining-ss (ssget "x" '((0 . "LINE"))))
   (if (and (= count 1)
            remaining-ss
@@ -2371,40 +2948,65 @@
   )
   (if remaining-ss (command-s "_.erase" (ssname remaining-ss 0) ""))
 
-  ;; Test 7: dup-remove-all (integration)
-  (princ "\n[Test 7] dup-remove-all...")
+  (princ "\n[Test 7] dup-remove-all (integration)...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,0" "1000,0" "")  ; identical
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "500,0" "1500,0" "")  ; overlapping
+  (command-s "_.line" "500,0" "1500,0" "")
   (setq ent3 (entlast))
   (setq result (dup-remove-all nil "0"))
-  (if (and (= (car result) 1)  ; 1 identical removed
-           (= (cadr result) 1)) ; 1 merge performed
+  (if (and (= (car result) 1)
+           (= (cadr result) 1))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (setq ss (ssget "x" '((0 . "LINE"))))
   (if ss (command-s "_.erase" ss ""))
 
-  ;; Test 8: tolerance get/set
   (princ "\n[Test 8] tolerance get/set...")
   (setq old-tol (dup-get-tolerance))
   (dup-set-tolerance 5.0)
   (if (= (dup-get-tolerance) 5.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (dup-set-tolerance old-tol)
     )
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
+  (princ "\n[Test 9] dup-endpoint-hash...")
+  (setq h1 (dup-endpoint-hash (list (list 0.0 0.0 0.0) (list 1000.0 0.0 0.0))))
+  (setq h2 (dup-endpoint-hash (list (list 1000.0 0.0 0.0) (list 0.0 0.0 0.0))))
+  (if (= h1 h2)
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 10] dup-key-to-hash...")
+  (setq k1 (dup-key-to-hash (list 0.0 0.0 0.0 0.0)))
+  (setq k2 (dup-key-to-hash (list 0.0 0.5 0.0 0.0)))
+  (if (and (= k1 k2)
+           (stringp k1))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 11] spatial hash cell size get/set...")
+  (setq old-cs (sp-get-cell-size))
+  (sp-set-cell-size 10000.0)
+  (if (= (sp-get-cell-size) 10000.0)
+    (progn
+      (princ " PASS")
+      (setq passed (1+ passed))
+      (sp-set-cell-size old-cs)
+    )
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
   (command-s "_.undo" "_e")
 
-  ;; Summary
   (princ (strcat "\n\n=== M04 Test Summary: "
                  (itoa passed) " passed, "
                  (itoa failed) " failed ===\n"))
@@ -2420,29 +3022,176 @@
 (princ (strcat "  Functions: dup-remove-identical, dup-merge-colinear, "
                "dup-remove-all, dup-lines-identical-p"))
 (princ (strcat "\n  Default tolerance: " (rtos *dup-tolerance* 2 2)))
+(princ (strcat "\n  Spatial cell size: " (rtos *sp-default-cell-size* 2 0)))
+(princ "\n  Dependencies: M00 (spatial_index.lsp), M02 (line_utils.lsp)")
 (princ "\n  Test: (test-M04-duplicate-remover)")
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M04_duplicate_remover.lsp
-;;;  Next: M05_break_lines.lsp
 ;;;===============================================================
-
-;;;===============================================================
-;;;  M05 - Break Lines Module (Simplified)
+;;;  M05 - Break Lines Module (Optimized)
 ;;;  Break LINE entities at intersection points
+;;;  Optimized: spatial index, batch processing, entmake
 ;;;  NOTE: Only handles LINE entities, not ARC/CIRCLE/SPLINE
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M02 (line_utils.lsp)
+;;;  DEPENDENCIES: M00 (spatial_index.lsp), M02 (line_utils.lsp)
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
-;;;  *break-tolerance* - Distance tolerance for point comparison
 (setq *break-tolerance* 0.001)
+
+;;;---------------------------------------------------------------
+;;;  break-build-spatial-index
+;;;  Build spatial hash index from line entities
+;;;  Uses sp-build-index from M00 for index construction
+;;;  Args: line-ss - selection set of LINE entities
+;;;         cell-size - grid cell size
+;;;  Returns: (index line-data) where
+;;;    index = assoc list of (cell-key . (line-idx ...))
+;;;    line-data = list of (ent pts box)
+;;;---------------------------------------------------------------
+(defun break-build-spatial-index (line-ss cell-size / line-data i ent pts box idx)
+  (setq line-data nil)
+  (setq i 0)
+  (if line-ss
+    (progn
+      (repeat (sslength line-ss)
+        (setq ent (ssname line-ss i))
+        (if ent
+          (progn
+            (setq pts (line-get-endpoints ent))
+            (if pts
+              (setq line-data (cons (list ent pts (sp-box-from-pts pts)) line-data))
+            )
+          )
+        )
+        (setq i (1+ i))
+      )
+      (setq line-data (reverse line-data))
+      (setq idx (sp-build-index line-data '(lambda (r) (caddr r)) cell-size))
+      (list idx line-data)
+    )
+    (list nil nil)
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  break-create-segments-entmake
+;;;  Create line segments from break points using entmake
+;;;  Args: start-pt - original line start
+;;;         end-pt   - original line end
+;;;         pt-list  - sorted list of break points (excluding endpoints)
+;;;         layer    - layer for new lines
+;;;  Returns: list of created entity names
+;;;---------------------------------------------------------------
+(defun break-create-segments-entmake (start-pt end-pt pt-list layer / prev-pt new-ent result)
+  (setq result nil)
+  (setq prev-pt start-pt)
+  (foreach pt pt-list
+    (if (> (distance prev-pt pt) *break-tolerance*)
+      (progn
+        (setq new-ent
+          (entmakex
+            (list
+              (cons 0 "LINE")
+              (cons 8 layer)
+              (cons 10 prev-pt)
+              (cons 11 pt)
+            )
+          )
+        )
+        (if new-ent (setq result (cons new-ent result)))
+        (setq prev-pt pt)
+      )
+    )
+  )
+  (if (> (distance prev-pt end-pt) *break-tolerance*)
+    (progn
+      (setq new-ent
+        (entmakex
+          (list
+            (cons 0 "LINE")
+            (cons 8 layer)
+            (cons 10 prev-pt)
+            (cons 11 end-pt)
+          )
+        )
+      )
+      (if new-ent (setq result (cons new-ent result)))
+    )
+  )
+  (reverse result)
+)
+
+;;;---------------------------------------------------------------
+;;;  break-line-at-points
+;;;  Break a single line at specified points using entmake
+;;;  Args: ent     - entity to break
+;;;         pt-list - list of break points
+;;;  Returns: list of new segment entity names or nil
+;;;---------------------------------------------------------------
+(defun break-line-at-points (ent pt-list / pts start-pt end-pt layer sorted-pts new-ents)
+  (setq pts (line-get-endpoints ent))
+  (if (and pts (> (length pt-list) 0))
+    (progn
+      (setq start-pt (car pts))
+      (setq end-pt (cadr pts))
+      (setq layer (line-get-layer ent))
+      (setq sorted-pts (sp-sort-points-by-distance start-pt pt-list))
+      (setq sorted-pts
+        (vl-remove-if
+          '(lambda (p)
+             (or (< (distance p start-pt) *break-tolerance*)
+                 (< (distance p end-pt) *break-tolerance*)))
+          sorted-pts))
+      (setq new-ents (break-create-segments-entmake start-pt end-pt sorted-pts layer))
+      (entdel ent)
+      new-ents
+    )
+    nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  break-collect-intersections-indexed
+;;;  Collect all intersection points using spatial index
+;;;  Only checks lines in nearby spatial cells
+;;;  Args: line-idx - index of current line in line-data
+;;;         line-data - list of (ent pts box)
+;;;         idx - spatial index
+;;;         cell-size - grid cell size
+;;;  Returns: list of intersection points
+;;;---------------------------------------------------------------
+(defun break-collect-intersections-indexed (line-idx line-data idx cell-size /
+                                              rec ent1 box nearby-indices pts i rec2 ent2 int-pts)
+  (setq rec (nth line-idx line-data))
+  (setq ent1 (car rec))
+  (setq box (caddr rec))
+  (setq nearby-indices (sp-get-candidates box idx cell-size))
+  (setq pts nil)
+  (foreach ni nearby-indices
+    (if (/= ni line-idx)
+      (progn
+        (setq rec2 (nth ni line-data))
+        (setq ent2 (car rec2))
+        (if (and ent2 (sp-boxes-overlap-p box (caddr rec2) nil))
+          (progn
+            (setq int-pts (lines-get-intersection ent1 ent2))
+            (if int-pts
+              (foreach pt int-pts
+                (setq pts (cons pt pts))
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (sp-remove-duplicate-points pts *break-tolerance*)
+)
 
 ;;;---------------------------------------------------------------
 ;;;  break-collect-intersections
@@ -2472,125 +3221,7 @@
       )
     )
   )
-  ;; Remove duplicate points
-  (break-remove-duplicate-points pts *break-tolerance*)
-)
-
-;;;---------------------------------------------------------------
-;;;  break-remove-duplicate-points
-;;;  Remove duplicate points from a list
-;;;  Args: pt-list - list of points
-;;;         tol     - distance tolerance
-;;;  Returns: list with duplicates removed
-;;;---------------------------------------------------------------
-(defun break-remove-duplicate-points (pt-list tol / result)
-  (setq result nil)
-  (foreach pt pt-list
-    (if (not (break-point-in-list-p pt result tol))
-      (setq result (cons pt result))
-    )
-  )
-  (reverse result)
-)
-
-;;;---------------------------------------------------------------
-;;;  break-point-in-list-p
-;;;  Check if a point is already in a list (within tolerance)
-;;;  Args: pt      - point to check
-;;;         pt-list - list of points
-;;;         tol     - distance tolerance
-;;;  Returns: T or nil
-;;;---------------------------------------------------------------
-(defun break-point-in-list-p (pt pt-list tol / found)
-  (setq found nil)
-  (foreach p pt-list
-    (if (< (distance pt p) tol)
-      (setq found T)
-    )
-  )
-  found
-)
-
-;;;---------------------------------------------------------------
-;;;  break-sort-points-by-distance
-;;;  Sort intersection points by distance from line start
-;;;  Args: start-pt - line start point
-;;;         pt-list  - list of points to sort
-;;;  Returns: sorted list of points
-;;;---------------------------------------------------------------
-(defun break-sort-points-by-distance (start-pt pt-list / dist-list)
-  (setq dist-list nil)
-  (foreach pt pt-list
-    (setq dist-list (cons (cons (distance start-pt pt) pt) dist-list))
-  )
-  ;; Sort by distance
-  (setq dist-list (vl-sort dist-list '(lambda (a b) (< (car a) (car b)))))
-  ;; Extract points
-  (mapcar 'cdr dist-list)
-)
-
-;;;---------------------------------------------------------------
-;;;  break-create-segments
-;;;  Create line segments from break points
-;;;  Args: start-pt - original line start
-;;;         end-pt   - original line end
-;;;         pt-list  - sorted list of break points (excluding endpoints)
-;;;         layer    - layer for new lines
-;;;  Returns: selection set of created segments
-;;;---------------------------------------------------------------
-(defun break-create-segments (start-pt end-pt pt-list layer / ss prev-pt new-ent)
-  (setq ss (ssadd))
-  (setq prev-pt start-pt)
-  (foreach pt pt-list
-    (if (> (distance prev-pt pt) *break-tolerance*)
-      (progn
-        (setq new-ent (line-create-on-layer prev-pt pt layer))
-        (if new-ent (setq ss (ssadd new-ent ss)))
-        (setq prev-pt pt)
-      )
-    )
-  )
-  ;; Create final segment to end point
-  (if (> (distance prev-pt end-pt) *break-tolerance*)
-    (progn
-      (setq new-ent (line-create-on-layer prev-pt end-pt layer))
-      (if new-ent (setq ss (ssadd new-ent ss)))
-    )
-  )
-  ss
-)
-
-;;;---------------------------------------------------------------
-;;;  break-line-at-points
-;;;  Break a single line at specified points
-;;;  Args: ent     - entity to break
-;;;         pt-list - list of break points
-;;;  Returns: selection set of new segments or nil
-;;;---------------------------------------------------------------
-(defun break-line-at-points (ent pt-list / pts start-pt end-pt layer sorted-pts ss)
-  (setq pts (line-get-endpoints ent))
-  (if (and pts (> (length pt-list) 0))
-    (progn
-      (setq start-pt (car pts))
-      (setq end-pt (cadr pts))
-      (setq layer (line-get-layer ent))
-      ;; Sort points by distance from start
-      (setq sorted-pts (break-sort-points-by-distance start-pt pt-list))
-      ;; Filter out endpoints
-      (setq sorted-pts
-        (vl-remove-if
-          '(lambda (p)
-             (or (< (distance p start-pt) *break-tolerance*)
-                 (< (distance p end-pt) *break-tolerance*)))
-          sorted-pts))
-      ;; Create segments
-      (setq ss (break-create-segments start-pt end-pt sorted-pts layer))
-      ;; Delete original
-      (entdel ent)
-      ss
-    )
-    nil
-  )
+  (sp-remove-duplicate-points pts *break-tolerance*)
 )
 
 ;;;---------------------------------------------------------------
@@ -2598,7 +3229,7 @@
 ;;;  Break a single line at all intersection points with other lines
 ;;;  Args: ent     - entity to break
 ;;;         line-ss - selection set of lines to intersect with
-;;;  Returns: selection set of new segments or nil
+;;;  Returns: list of new segment entity names or nil
 ;;;---------------------------------------------------------------
 (defun break-line-at-intersections (ent line-ss / int-pts)
   (setq int-pts (break-collect-intersections ent line-ss))
@@ -2611,45 +3242,73 @@
 ;;;---------------------------------------------------------------
 ;;;  break-lines-in-set
 ;;;  Break all lines in a selection set at their intersections
+;;;  Uses spatial index for O(n*k) instead of O(n^2)
 ;;;  Args: line-ss - selection set of lines
 ;;;  Returns: selection set of all resulting lines
 ;;;---------------------------------------------------------------
-(defun break-lines-in-set (line-ss / i ent all-lines int-pts new-segments)
-  (setq all-lines (ssadd))
+(defun break-lines-in-set (line-ss / spatial-result idx line-data i n
+                                      int-pts new-ents all-ents ent)
+  (setq all-ents (ssadd))
   (if line-ss
     (progn
-      (princ (strcat "\n[break] Breaking " (itoa (sslength line-ss)) " lines..."))
-      ;; First pass: collect all intersection points for each line
-      (setq i 0)
-      (repeat (sslength line-ss)
-        (setq ent (ssname line-ss i))
-        (if ent
-          (progn
-            (setq int-pts (break-collect-intersections ent line-ss))
-            (if (> (length int-pts) 0)
+      (setq n (sslength line-ss))
+      (princ (strcat "\n[break] Breaking " (itoa n) " lines..."))
+
+      (if (> n 50)
+        (progn
+          (setq spatial-result (break-build-spatial-index line-ss (sp-get-cell-size)))
+          (setq idx (car spatial-result))
+          (setq line-data (cadr spatial-result))
+          (setq i 0)
+          (repeat n
+            (setq int-pts (break-collect-intersections-indexed i line-data idx (sp-get-cell-size)))
+            (setq ent (car (nth i line-data)))
+            (if (and ent (entget ent))
               (progn
-                (setq new-segments (break-line-at-points ent int-pts))
-                (if new-segments
+                (if (> (length int-pts) 0)
                   (progn
-                    (setq j 0)
-                    (repeat (sslength new-segments)
-                      (setq all-lines (ssadd (ssname new-segments j) all-lines))
-                      (setq j (1+ j))
+                    (setq new-ents (break-line-at-points ent int-pts))
+                    (if new-ents
+                      (foreach ne new-ents
+                        (setq all-ents (ssadd ne all-ents))
+                      )
                     )
                   )
+                  (setq all-ents (ssadd ent all-ents))
                 )
               )
-              ;; No intersections, keep original
-              (setq all-lines (ssadd ent all-lines))
             )
+            (setq i (1+ i))
           )
         )
-        (setq i (1+ i))
+        (progn
+          (setq i 0)
+          (repeat n
+            (setq ent (ssname line-ss i))
+            (if ent
+              (progn
+                (setq int-pts (break-collect-intersections ent line-ss))
+                (if (> (length int-pts) 0)
+                  (progn
+                    (setq new-ents (break-line-at-points ent int-pts))
+                    (if new-ents
+                      (foreach ne new-ents
+                        (setq all-ents (ssadd ne all-ents))
+                      )
+                    )
+                  )
+                  (setq all-ents (ssadd ent all-ents))
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+        )
       )
-      (princ (strcat "\n[break] Result: " (itoa (sslength all-lines)) " segments"))
+      (princ (strcat "\n[break] Result: " (itoa (sslength all-ents)) " segments"))
     )
   )
-  all-lines
+  all-ents
 )
 
 ;;;---------------------------------------------------------------
@@ -2660,8 +3319,7 @@
 ;;;---------------------------------------------------------------
 (defun break-lines-all (layer-list / filter-list line-ss)
   (princ "\n[break] Breaking lines at intersections...")
-  
-  ;; Build filter
+
   (setq filter-list (list (cons 0 "LINE")))
   (if layer-list
     (if (stringp layer-list)
@@ -2669,10 +3327,9 @@
       (setq filter-list (cons (cons 8 (apply 'strcat (mapcar '(lambda (x) (strcat x ",")) layer-list))) filter-list))
     )
   )
-  
-  ;; Get lines
+
   (setq line-ss (ssget "x" filter-list))
-  
+
   (if (null line-ss)
     (progn
       (princ "\n[break] No lines found.")
@@ -2712,11 +3369,10 @@
 
   (command-s "_.undo" "_be")
 
-  ;; Test 1: break-collect-intersections
   (princ "\n[Test 1] break-collect-intersections...")
-  (command-s "_.line" "0,0" "1000,0" "")    ; horizontal
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,-500" "500,500" "") ; vertical, crosses at (500,0)
+  (command-s "_.line" "500,-500" "500,500" "")
   (setq ent2 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
@@ -2731,13 +3387,12 @@
   (command-s "_.erase" ent1 "")
   (command-s "_.erase" ent2 "")
 
-  ;; Test 2: break-sort-points-by-distance
   (princ "\n[Test 2] break-sort-points-by-distance...")
   (setq start (list 0.0 0.0 0.0))
   (setq pt-list (list (list 800.0 0.0 0.0)
                       (list 200.0 0.0 0.0)
                       (list 500.0 0.0 0.0)))
-  (setq sorted (break-sort-points-by-distance start pt-list))
+  (setq sorted (sp-sort-points-by-distance start pt-list))
   (if (and sorted
            (= (length sorted) 3)
            (< (abs (- (car (car sorted)) 200.0)) 0.001)
@@ -2747,104 +3402,81 @@
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
-  ;; Test 3: break-remove-duplicate-points
   (princ "\n[Test 3] break-remove-duplicate-points...")
   (setq pt-list (list (list 100.0 100.0 0.0)
-                      (list 100.001 100.0 0.0)  ; near duplicate
+                      (list 100.001 100.0 0.0)
                       (list 200.0 200.0 0.0)
-                      (list 100.0 100.0 0.0)))   ; exact duplicate
-  (setq unique (break-remove-duplicate-points pt-list 0.01))
+                      (list 100.0 100.0 0.0)))
+  (setq unique (sp-remove-duplicate-points pt-list 0.01))
   (if (= (length unique) 2)
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
-  ;; Test 4: break-line-at-points
   (princ "\n[Test 4] break-line-at-points...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
   (setq break-pts (list (list 300.0 0.0 0.0)
                         (list 700.0 0.0 0.0)))
   (setq result (break-line-at-points ent1 break-pts))
-  (if (and result (= (sslength result) 3))
+  (if (and result (= (length result) 3))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (if result
-    (progn
-      (setq i 0)
-      (repeat (sslength result)
-        (command-s "_.erase" (ssname result i) "")
-        (setq i (1+ i))
-      )
+    (foreach ne result
+      (if (entget ne) (command-s "_.erase" ne ""))
     )
   )
 
-  ;; Test 5: break-line-at-intersections (T-junction)
   (princ "\n[Test 5] break-line-at-intersections (T-junction)...")
-  (command-s "_.line" "0,0" "1000,0" "")    ; main line
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "500,0" "500,500" "") ; T-junction at (500,0)
+  (command-s "_.line" "500,0" "500,500" "")
   (setq ent2 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq result (break-line-at-intersections ent1 ss))
-  ;; Main line should be split into 2 segments
-  (if (and result (= (sslength result) 2))
+  (if (and result (= (length result) 2))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (if result
-    (progn
-      (setq i 0)
-      (repeat (sslength result)
-        (command-s "_.erase" (ssname result i) "")
-        (setq i (1+ i))
-      )
+    (foreach ne result
+      (if (entget ne) (command-s "_.erase" ne ""))
     )
   )
   (command-s "_.erase" ent2 "")
 
-  ;; Test 6: break-line-at-intersections (X-junction)
   (princ "\n[Test 6] break-line-at-intersections (X-junction)...")
-  (command-s "_.line" "0,0" "1000,1000" "") ; diagonal
+  (command-s "_.line" "0,0" "1000,1000" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,1000" "1000,0" "") ; crossing diagonal
+  (command-s "_.line" "0,1000" "1000,0" "")
   (setq ent2 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
   (setq ss (ssadd ent2 ss))
   (setq result (break-line-at-intersections ent1 ss))
-  ;; Each line should be split into 2 segments
-  (if (and result (= (sslength result) 2))
+  (if (and result (= (length result) 2))
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (if result
-    (progn
-      (setq i 0)
-      (repeat (sslength result)
-        (command-s "_.erase" (ssname result i) "")
-        (setq i (1+ i))
-      )
+    (foreach ne result
+      (if (entget ne) (command-s "_.erase" ne ""))
     )
   )
   (command-s "_.erase" ent2 "")
 
-  ;; Test 7: break-lines-in-set (grid pattern)
   (princ "\n[Test 7] break-lines-in-set (grid pattern)...")
-  ;; Create a simple grid
-  (command-s "_.line" "0,0" "1000,0" "")    ; horizontal
+  (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
-  (command-s "_.line" "0,500" "1000,500" "") ; horizontal
+  (command-s "_.line" "0,500" "1000,500" "")
   (setq ent2 (entlast))
-  (command-s "_.line" "250,-100" "250,600" "") ; vertical
+  (command-s "_.line" "250,-100" "250,600" "")
   (setq ent3 (entlast))
-  (command-s "_.line" "750,-100" "750,600" "") ; vertical
+  (command-s "_.line" "750,-100" "750,600" "")
   (setq ent4 (entlast))
   (setq ss (ssadd))
   (setq ss (ssadd ent1 ss))
@@ -2852,16 +3484,13 @@
   (setq ss (ssadd ent3 ss))
   (setq ss (ssadd ent4 ss))
   (setq result (break-lines-in-set ss))
-  ;; 4 lines, 4 intersection points, each line split into 3 segments
-  ;; Total: 12 segments
   (if (and result (= (sslength result) 12))
     (progn (princ " PASS") (setq passed (1+ passed)))
-    (progn 
+    (progn
       (princ (strcat " FAIL (got " (itoa (sslength result)) " segments, expected 12)"))
       (setq failed (1+ failed))
     )
   )
-  ;; Cleanup
   (if result
     (progn
       (setq i 0)
@@ -2872,8 +3501,7 @@
     )
   )
 
-  ;; Test 8: break-lines-all (integration)
-  (princ "\n[Test 8] break-lines-all...")
+  (princ "\n[Test 8] break-lines-all (integration)...")
   (command-s "_.line" "0,0" "1000,0" "")
   (setq ent1 (entlast))
   (command-s "_.line" "500,-500" "500,500" "")
@@ -2883,7 +3511,6 @@
     (progn (princ " PASS") (setq passed (1+ passed)))
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
-  ;; Cleanup
   (if result
     (progn
       (setq i 0)
@@ -2894,22 +3521,41 @@
     )
   )
 
-  ;; Test 9: tolerance get/set
   (princ "\n[Test 9] tolerance get/set...")
   (setq old-tol (break-get-tolerance))
   (break-set-tolerance 0.01)
   (if (= (break-get-tolerance) 0.01)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (break-set-tolerance old-tol)
     )
     (progn (princ " FAIL") (setq failed (1+ failed)))
   )
 
+  (princ "\n[Test 10] spatial hash cell size get/set...")
+  (setq old-cs (sp-get-cell-size))
+  (sp-set-cell-size 10000.0)
+  (if (= (sp-get-cell-size) 10000.0)
+    (progn
+      (princ " PASS")
+      (setq passed (1+ passed))
+      (sp-set-cell-size old-cs)
+    )
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
+  (princ "\n[Test 11] break-boxes-overlap-p...")
+  (if (and (sp-boxes-overlap-p (list 0.0 0.0 1000.0 1000.0)
+                                (list 500.0 500.0 1500.0 1500.0) nil)
+           (null (sp-boxes-overlap-p (list 0.0 0.0 100.0 100.0)
+                                     (list 200.0 200.0 300.0 300.0) nil)))
+    (progn (princ " PASS") (setq passed (1+ passed)))
+    (progn (princ " FAIL") (setq failed (1+ failed)))
+  )
+
   (command-s "_.undo" "_e")
 
-  ;; Summary
   (princ (strcat "\n\n=== M05 Test Summary: "
                  (itoa passed) " passed, "
                  (itoa failed) " failed ===\n"))
@@ -2925,15 +3571,12 @@
 (princ (strcat "  Functions: break-lines-in-set, break-lines-all, "
                "break-line-at-intersections, break-line-at-points"))
 (princ (strcat "\n  Default tolerance: " (rtos *break-tolerance* 2 4)))
+(princ (strcat "\n  Spatial cell size: " (rtos *sp-default-cell-size* 2 0)))
+(princ "\n  Dependencies: M00 (spatial_index.lsp), M02 (line_utils.lsp)")
 (princ "\n  Test: (test-M05-break-lines)")
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M05_break_lines.lsp
-;;;  Next: M06_block_utils.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M06 - Block Utilities Module
 ;;;  Block-related utility functions
@@ -2955,10 +3598,15 @@
 ;;;  Returns: point list or nil
 ;;;---------------------------------------------------------------
 (defun block-get-insertion-point (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 10 elist))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 10 elist))
+        nil
+      )
+    )
   )
 )
 
@@ -2969,10 +3617,15 @@
 ;;;  Returns: string block name or nil
 ;;;---------------------------------------------------------------
 (defun block-get-name (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 2 elist))
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 2 elist))
+        nil
+      )
+    )
   )
 )
 
@@ -2983,8 +3636,13 @@
 ;;;  Returns: string layer name
 ;;;---------------------------------------------------------------
 (defun block-get-layer (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 8 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 8 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -2994,14 +3652,19 @@
 ;;;  Returns: (x-scale y-scale z-scale) or nil
 ;;;---------------------------------------------------------------
 (defun block-get-scale (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (list
-      (cdr (assoc 41 elist))
-      (cdr (assoc 42 elist))
-      (cdr (assoc 43 elist))
-    )
+  (if (null ent)
     nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (list
+          (cdr (assoc 41 elist))
+          (cdr (assoc 42 elist))
+          (cdr (assoc 43 elist))
+        )
+        nil
+      )
+    )
   )
 )
 
@@ -3012,10 +3675,15 @@
 ;;;  Returns: float angle in radians
 ;;;---------------------------------------------------------------
 (defun block-get-rotation (ent / elist)
-  (setq elist (entget ent))
-  (if (= (cdr (assoc 0 elist)) "INSERT")
-    (cdr (assoc 50 elist))
-    0.0
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (if (= (cdr (assoc 0 elist)) "INSERT")
+        (cdr (assoc 50 elist))
+        0.0
+      )
+    )
   )
 )
 
@@ -3058,7 +3726,7 @@
 ;;;  Args: ent - entity name
 ;;;  Returns: float area or 0
 ;;;---------------------------------------------------------------
-(defun block-entity-get-area (ent / elist etype obj area)
+(defun block-entity-get-area (ent / elist etype obj area r)
   (setq elist (entget ent))
   (setq etype (cdr (assoc 0 elist)))
   (cond
@@ -3069,10 +3737,15 @@
     ((= etype "LWPOLYLINE")
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (if (= (vla-get-closed obj) :vlax-true)
-       (vlax-get obj 'area)
-       0.0
-     )
+     (setq area (vl-catch-all-apply
+       '(lambda ()
+          (if (= (vla-get-closed obj) :vlax-true)
+            (vlax-get obj 'area)
+            0.0
+          )
+        )
+     ))
+     (if (vl-catch-all-error-p area) 0.0 area)
     )
     ((or (= etype "POLYLINE") (= etype "REGION") (= etype "SOLID"))
      (vl-load-com)
@@ -3145,12 +3818,12 @@
     ((or (= etype "LWPOLYLINE") (= etype "POLYLINE"))
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (vlax-get obj 'Centroid)
+     (vl-catch-all-apply '(lambda () (vlax-get obj 'Centroid)))
     )
     (T
      (vl-load-com)
      (setq obj (vlax-ename->vla-object ent))
-     (vlax-get obj 'InsertionPoint)
+     (vl-catch-all-apply '(lambda () (vlax-get obj 'InsertionPoint)))
     )
   )
 )
@@ -3164,7 +3837,8 @@
 ;;;---------------------------------------------------------------
 (defun block-get-base-point (ent / block-name largest-ent center insertion scale rotation)
   (setq block-name (block-get-name ent))
-  (if block-name
+  (if (null block-name)
+    nil
     (progn
       (setq largest-ent (block-find-largest-entity block-name))
       (if largest-ent
@@ -3173,14 +3847,11 @@
           (setq insertion (block-get-insertion-point ent))
           (setq scale (block-get-scale ent))
           (setq rotation (block-get-rotation ent))
-          ;; Transform center to world coordinates
           (block-transform-point center insertion scale rotation)
         )
-        ;; Fallback: use insertion point
         (block-get-insertion-point ent)
       )
     )
-    nil
   )
 )
 
@@ -3198,10 +3869,8 @@
   (setq y (cadr pt))
   (setq sx (car scale))
   (setq sy (cadr scale))
-  ;; Apply scale
   (setq x (* x sx))
   (setq y (* y sy))
-  ;; Apply rotation
   (if (/= rotation 0.0)
     (progn
       (setq cos-r (cos rotation))
@@ -3212,7 +3881,6 @@
       (setq y y-new)
     )
   )
-  ;; Apply translation
   (list (+ x (car insertion))
         (+ y (cadr insertion))
         (+ (caddr pt) (caddr insertion)))
@@ -3225,10 +3893,13 @@
 ;;;         radius - search radius
 ;;;  Returns: (text-entity text-content distance) or nil
 ;;;---------------------------------------------------------------
-(defun block-find-nearest-text (pt radius / pt1 pt2 ss i ent content min-dist nearest)
+(defun block-find-nearest-text (pt radius / pt1 pt2 ss i ent content min-dist nearest dist)
   (setq pt1 (polar pt (* pi 0.75) radius))
   (setq pt2 (polar pt (* pi -0.25) radius))
-  (setq ss (ssget "_c" pt1 pt2 '((0 . "TEXT,MTEXT"))))
+  (setq ss (vl-catch-all-apply 'ssget (list "_c" pt1 pt2 '((0 . "TEXT,MTEXT")))))
+  (if (vl-catch-all-error-p ss)
+    (setq ss nil)
+  )
   (if ss
     (progn
       (setq min-dist radius)
@@ -3267,16 +3938,21 @@
 ;;;  Returns: string content or nil
 ;;;---------------------------------------------------------------
 (defun block-text-get-content (ent / elist etype)
-  (setq elist (entget ent))
-  (setq etype (cdr (assoc 0 elist)))
-  (cond
-    ((= etype "TEXT")
-     (cdr (assoc 1 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (setq etype (cdr (assoc 0 elist)))
+      (cond
+        ((= etype "TEXT")
+         (cdr (assoc 1 elist))
+        )
+        ((= etype "MTEXT")
+         (cdr (assoc 1 elist))
+        )
+        (T nil)
+      )
     )
-    ((= etype "MTEXT")
-     (cdr (assoc 1 elist))
-    )
-    (T nil)
   )
 )
 
@@ -3287,8 +3963,13 @@
 ;;;  Returns: point list
 ;;;---------------------------------------------------------------
 (defun block-text-get-position (ent / elist)
-  (setq elist (entget ent))
-  (cdr (assoc 10 elist))
+  (if (null ent)
+    nil
+    (progn
+      (setq elist (entget ent))
+      (cdr (assoc 10 elist))
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -3510,8 +4191,8 @@
   (setq old-rad (block-get-search-radius))
   (block-set-search-radius 5000.0)
   (if (= (block-get-search-radius) 5000.0)
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (block-set-search-radius old-rad)
     )
@@ -3543,11 +4224,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M06_block_utils.lsp
-;;;  Next: M07_device_projection.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M07 - Device Projection Module
 ;;;  Project device points to graph network
@@ -3560,35 +4236,27 @@
 ;;;  Global Parameters
 ;;;---------------------------------------------------------------
 (setq *device-search-radius* 1500.0)
-(setq *device-pipe-layer* nil)  ; Optional pipe layer for routing
+(setq *device-pipe-layer* nil)
 
 ;;;---------------------------------------------------------------
-;;;  device-find-nearest-line
-;;;  Find the nearest LINE entity to a point
-;;;  Args: pt       - point to project
-;;;         line-ss  - selection set of lines (nil = use filter)
-;;;         gllst    - optional DXF filter
+;;;  device-find-nearest-entity
+;;;  Internal helper: find nearest entity in a selection set
+;;;  Args: pt         - point to project
+;;;         entity-ss  - selection set of entities
+;;;         max-radius - maximum search radius
 ;;;  Returns: (entity closest-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-find-nearest-line (pt line-ss gllst / i ent min-ent min-pt min-dist cp d)
-  (if (null line-ss)
+(defun device-find-nearest-entity (pt entity-ss max-radius / i ent min-ent min-pt min-dist cp d)
+  (if entity-ss
     (progn
-      (if gllst
-        (setq line-ss (ssget "x" (append '((0 . "LINE")) gllst)))
-        (setq line-ss (ssget "x" '((0 . "LINE"))))
-      )
-    )
-  )
-  (if line-ss
-    (progn
-      (setq min-ent nil min-pt nil min-dist *device-search-radius*)
+      (setq min-ent nil min-pt nil min-dist max-radius)
       (setq i 0)
-      (repeat (sslength line-ss)
-        (setq ent (ssname line-ss i))
+      (repeat (sslength entity-ss)
+        (setq ent (ssname entity-ss i))
         (if ent
           (progn
-            (setq cp (line-get-closest-point ent pt))
-            (if cp
+            (setq cp (vl-catch-all-apply 'vlax-curve-getClosestPointTo (list ent pt)))
+            (if (and cp (not (vl-catch-all-error-p cp)))
               (progn
                 (setq d (distance pt cp))
                 (if (< d min-dist)
@@ -3607,6 +4275,27 @@
       (if min-ent (list min-ent min-pt min-dist) nil)
     )
     nil
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  device-find-nearest-line
+;;;  Find the nearest LINE entity to a point
+;;;  Args: pt       - point to project
+;;;         line-ss  - selection set of lines (nil = use filter)
+;;;         gllst    - optional DXF filter
+;;;  Returns: (entity closest-point distance) or nil
+;;;---------------------------------------------------------------
+(defun device-find-nearest-line (pt line-ss gllst / ss)
+  (if (null line-ss)
+    (progn
+      (if gllst
+        (setq ss (ssget "x" (append '((0 . "LINE")) gllst)))
+        (setq ss (ssget "x" '((0 . "LINE"))))
+      )
+      (if ss (device-find-nearest-entity pt ss *device-search-radius*) nil)
+    )
+    (device-find-nearest-entity pt line-ss *device-search-radius*)
   )
 )
 
@@ -3617,36 +4306,8 @@
 ;;;         pipe-ss   - selection set of pipes
 ;;;  Returns: (entity closest-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-find-nearest-pipe (pt pipe-ss / i ent min-ent min-pt min-dist cp d)
-  (if pipe-ss
-    (progn
-      (setq min-ent nil min-pt nil min-dist *device-search-radius*)
-      (setq i 0)
-      (repeat (sslength pipe-ss)
-        (setq ent (ssname pipe-ss i))
-        (if ent
-          (progn
-            (setq cp (line-get-closest-point ent pt))
-            (if cp
-              (progn
-                (setq d (distance pt cp))
-                (if (< d min-dist)
-                  (progn
-                    (setq min-dist d)
-                    (setq min-pt cp)
-                    (setq min-ent ent)
-                  )
-                )
-              )
-            )
-          )
-        )
-        (setq i (1+ i))
-      )
-      (if min-ent (list min-ent min-pt min-dist) nil)
-    )
-    nil
-  )
+(defun device-find-nearest-pipe (pt pipe-ss)
+  (device-find-nearest-entity pt pipe-ss *device-search-radius*)
 )
 
 ;;;---------------------------------------------------------------
@@ -3657,16 +4318,13 @@
 ;;;         pipe-ss   - optional pipe selection set for routing
 ;;;  Returns: (graph-node-index projected-point distance) or nil
 ;;;---------------------------------------------------------------
-(defun device-project-to-graph (pt line-ss pipe-ss / nearest pipe-nearest)
-  ;; First try direct projection to lines
+(defun device-project-to-graph (pt line-ss pipe-ss / nearest pipe-nearest node-idx)
   (setq nearest (device-find-nearest-line pt line-ss nil))
   (if nearest
     (progn
-      ;; Add projection point to graph
       (setq node-idx (graph-add-node (cadr nearest)))
       (list node-idx (cadr nearest) (caddr nearest))
     )
-    ;; Try pipe routing if available
     (if pipe-ss
       (progn
         (setq pipe-nearest (device-find-nearest-pipe pt pipe-ss))
@@ -3696,12 +4354,8 @@
   (if (null *graph-floyd-done*)
     (progn (princ "\n[device] Error: Floyd-Warshall not computed.") nil)
     (progn
-      ;; Get lines from temp layer only (not entire drawing)
-      (setq line-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
-      ;; Project device to graph
-      (setq dev-info (graph-project-point device-pt line-ss nil))
-      ;; Project target to graph
-      (setq tgt-info (graph-project-point target-pt line-ss nil))
+      (setq dev-info (graph-project-point device-pt nil nil))
+      (setq tgt-info (graph-project-point target-pt nil nil))
       (if (and dev-info tgt-info)
         (progn
           (setq graph-dist (graph-get-distance (car dev-info) (car tgt-info)))
@@ -3754,62 +4408,67 @@
 ;;;  Returns: list of (device-pt junction-pt distance device-name)
 ;;;---------------------------------------------------------------
 (defun device-process-all (device-blocks junction-blocks cable-coef junction-bias / device-list junction-list result i ent pt name best)
-  (princ "\n[device] Processing devices...")
-  
-  ;; Build device list
-  (setq device-list nil)
-  (if device-blocks
+  (if (or (null device-blocks) (null junction-blocks))
     (progn
-      (setq i 0)
-      (repeat (sslength device-blocks)
-        (setq ent (ssname device-blocks i))
-        (if ent
-          (progn
-            (setq pt (block-get-base-point ent))
-            (setq name (block-get-name-from-text ent nil))
-            (if pt
-              (setq device-list (cons (list pt ent name) device-list))
+      (princ "\n[device] Warning: No device or junction blocks provided.")
+      nil
+    )
+    (progn
+      (princ "\n[device] Processing devices...")
+
+      (setq device-list nil)
+      (if device-blocks
+        (progn
+          (setq i 0)
+          (repeat (sslength device-blocks)
+            (setq ent (ssname device-blocks i))
+            (if ent
+              (progn
+                (setq pt (block-get-base-point ent))
+                (setq name (block-get-name-from-text ent nil))
+                (if pt
+                  (setq device-list (cons (list pt ent name) device-list))
+                )
+              )
             )
+            (setq i (1+ i))
           )
         )
-        (setq i (1+ i))
       )
-    )
-  )
-  (princ (strcat "\n[device] Found " (itoa (length device-list)) " devices."))
-  
-  ;; Build junction list
-  (setq junction-list nil)
-  (if junction-blocks
-    (progn
-      (setq i 0)
-      (repeat (sslength junction-blocks)
-        (setq ent (ssname junction-blocks i))
-        (if ent
-          (progn
-            (setq pt (block-get-base-point ent))
-            (if pt
-              (setq junction-list (cons pt junction-list))
+      (princ (strcat "\n[device] Found " (itoa (length device-list)) " devices."))
+
+      (setq junction-list nil)
+      (if junction-blocks
+        (progn
+          (setq i 0)
+          (repeat (sslength junction-blocks)
+            (setq ent (ssname junction-blocks i))
+            (if ent
+              (progn
+                (setq pt (block-get-base-point ent))
+                (if pt
+                  (setq junction-list (cons pt junction-list))
+                )
+              )
             )
+            (setq i (1+ i))
           )
         )
-        (setq i (1+ i))
       )
+      (princ (strcat "\n[device] Found " (itoa (length junction-list)) " junctions."))
+
+      (setq result nil)
+      (foreach dev device-list
+        (setq best (device-find-best-junction (car dev) junction-list cable-coef junction-bias))
+        (if best
+          (setq result (cons (list (car dev) (car best) (cadr best) (caddr dev)) result))
+        )
+      )
+
+      (princ (strcat "\n[device] Connected " (itoa (length result)) " devices."))
+      result
     )
   )
-  (princ (strcat "\n[device] Found " (itoa (length junction-list)) " junctions."))
-  
-  ;; Find best junction for each device
-  (setq result nil)
-  (foreach dev device-list
-    (setq best (device-find-best-junction (car dev) junction-list cable-coef junction-bias))
-    (if best
-      (setq result (cons (list (car dev) (car best) (cadr best) (caddr dev)) result))
-    )
-  )
-  
-  (princ (strcat "\n[device] Connected " (itoa (length result)) " devices."))
-  result
 )
 
 ;;;---------------------------------------------------------------
@@ -4057,11 +4716,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M07_device_projection.lsp
-;;;  Next: M08_equivalent_points.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M08 - Equivalent Points Module
 ;;;  Handle equivalent connectivity points
@@ -4092,10 +4746,18 @@
 ;;;  Returns: pair id
 ;;;---------------------------------------------------------------
 (defun equiv-add-pair (pt1 pt2 / id)
-  (setq id *equiv-next-id*)
-  (setq *equiv-pairs* (cons (list (list pt1 pt2) id) *equiv-pairs*))
-  (setq *equiv-next-id* (1+ *equiv-next-id*))
-  id
+  (if (or (null pt1) (null pt2))
+    (progn
+      (princ "\n[equiv] Error: nil point passed to equiv-add-pair")
+      nil
+    )
+    (progn
+      (setq id *equiv-next-id*)
+      (setq *equiv-pairs* (cons (list (list pt1 pt2) id) *equiv-pairs*))
+      (setq *equiv-next-id* (1+ *equiv-next-id*))
+      id
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -4122,15 +4784,23 @@
 ;;;  Returns: number of connections made
 ;;;---------------------------------------------------------------
 (defun equiv-process-all (line-ss / count)
-  (setq count 0)
-  (princ (strcat "\n[equiv] Processing " (itoa (length *equiv-pairs*)) " equivalent pairs..."))
-  (foreach pair *equiv-pairs*
-    (if (equiv-connect-pair (car pair) line-ss)
-      (setq count (1+ count))
+  (if (null line-ss)
+    (progn
+      (princ "\n[equiv] Error: nil selection set in equiv-process-all")
+      0
+    )
+    (progn
+      (setq count 0)
+      (princ (strcat "\n[equiv] Processing " (itoa (length *equiv-pairs*)) " equivalent pairs..."))
+      (foreach pair *equiv-pairs*
+        (if (equiv-connect-pair (car pair) line-ss)
+          (setq count (1+ count))
+        )
+      )
+      (princ (strcat "\n[equiv] Connected " (itoa count) " pairs."))
+      count
     )
   )
-  (princ (strcat "\n[equiv] Connected " (itoa count) " pairs."))
-  count
 )
 
 ;;;---------------------------------------------------------------
@@ -4140,19 +4810,40 @@
 ;;;         line-ss - selection set of lines
 ;;;  Returns: T if connected, nil otherwise
 ;;;---------------------------------------------------------------
-(defun equiv-connect-pair (pt-pair line-ss / pt1 pt2 proj1 proj2)
+(defun equiv-connect-pair (pt-pair line-ss / pt1 pt2 proj1 proj2 edge-result)
   (setq pt1 (car pt-pair))
   (setq pt2 (cadr pt-pair))
-  ;; Project both points to graph
   (setq proj1 (device-project-to-graph pt1 line-ss nil))
-  (setq proj2 (device-project-to-graph pt2 line-ss nil))
-  ;; Add edge between the two projected nodes
-  (if (and proj1 proj2)
+  (if (null proj1)
     (progn
-      (graph-add-edge (car proj1) (car proj2) (distance (cadr proj1) (cadr proj2)))
-      T
+      (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt1")
+      nil
     )
-    nil
+    (progn
+      (setq proj2 (device-project-to-graph pt2 line-ss nil))
+      (if (null proj2)
+        (progn
+          (princ "\n[equiv] Warning: device-project-to-graph returned nil for pt2")
+          nil
+        )
+        (progn
+          (setq edge-result
+            (vl-catch-all-apply
+              'graph-add-edge
+              (list (car proj1) (car proj2) (distance (cadr proj1) (cadr proj2)))
+            )
+          )
+          (if (vl-catch-all-error-p edge-result)
+            (progn
+              (princ (strcat "\n[equiv] Error: graph-add-edge failed - "
+                             (vl-catch-all-error-message edge-result)))
+              nil
+            )
+            T
+          )
+        )
+      )
+    )
   )
 )
 
@@ -4226,11 +4917,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M08_equivalent_points.lsp
-;;;  Next: M09_system_diagram.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M09 - System Diagram Module
 ;;;  Generate CCTV system diagram
@@ -4243,19 +4929,18 @@
 ;;;---------------------------------------------------------------
 ;;;  Global Parameters (matching original)
 ;;;---------------------------------------------------------------
-(setq *sysdiag-column-spacing* 12000.0)   ; Column spacing between groups
-(setq *sysdiag-block-offset* 6000.0)      ; Horizontal offset for block insertion
-(setq *sysdiag-text-height* 250.0)        ; Text height for labels
-(setq *sysdiag-rect-width* 1000.0)        ; Rectangle width around groups
-(setq *sysdiag-init-y-offset* 1019.0)     ; Initial Y offset (polar angle ~-11deg)
-(setq *sysdiag-init-angle* (/ pi -16.4))  ; Initial polar angle
-(setq *sysdiag-min-row-spacing* 700.0)    ; Minimum row spacing
-(setq *sysdiag-cable-label-prefix* "SXTGDDL")  ; Cable label prefix (was Chinese)
-(setq *sysdiag-dist-unit* 1000.0)         ; Distance unit divisor (mm to m)
+(setq *sysdiag-column-spacing* 12000.0)
+(setq *sysdiag-block-offset* 6000.0)
+(setq *sysdiag-text-height* 250.0)
+(setq *sysdiag-rect-width* 1000.0)
+(setq *sysdiag-init-y-offset* 1019.0)
+(setq *sysdiag-init-angle* (/ pi -16.4))
+(setq *sysdiag-min-row-spacing* 700.0)
+(setq *sysdiag-cable-label-prefix* "SXTGDDL")
+(setq *sysdiag-dist-unit* 1000.0)
 
-;;; Block bounding box globals (set during insertion)
-(setq *sysdiag-gj-heigh* nil)             ; Block height (set by sysdiag-insert-block)
-(setq *sysdiag-gj-length* nil)            ; Block width (set by sysdiag-insert-block)
+(setq *sysdiag-gj-heigh* nil)
+(setq *sysdiag-gj-length* nil)
 
 ;;;---------------------------------------------------------------
 ;;;  sysdiag-extract-number
@@ -4291,29 +4976,51 @@
 ;;;  Returns: list of groups, each group is a list of items
 ;;;           ((group1-item1 group1-item2 ...) (group2-item1 ...) ...)
 ;;;---------------------------------------------------------------
-(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx)
-  (setq i 0)
-  (setq end nil)
-  (setq end-drawlist lst)
-  (while end-drawlist
-    (setq tmp-lst (list (car end-drawlist)))
-    ;; Get junction name from 4th element (nth 3)
-    (setq tmp-gjx (nth 3 (car tmp-lst)))
-    (setq end-drawlist (cdr end-drawlist))
-    (setq i 0)
-    (repeat (length end-drawlist)
-      (if (= (nth 3 (nth i end-drawlist)) tmp-gjx)
-        (progn
-          (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
-          (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
+(defun sysdiag-classify-by-junction (lst / i end end-drawlist tmp-lst tmp-gjx catch-result)
+  (if (null lst)
+    nil
+    (progn
+      (setq i 0)
+      (setq end nil)
+      (setq end-drawlist lst)
+      (while end-drawlist
+        (setq tmp-lst (list (car end-drawlist)))
+        (setq catch-result
+          (vl-catch-all-apply
+            '(lambda ()
+              (nth 3 (car tmp-lst))
+            )
+          )
         )
-        (setq i (1+ i))
+        (if (vl-catch-all-error-p catch-result)
+          (setq tmp-gjx nil)
+          (setq tmp-gjx catch-result)
+        )
+        (setq end-drawlist (cdr end-drawlist))
+        (setq i 0)
+        (repeat (length end-drawlist)
+          (setq catch-result
+            (vl-catch-all-apply
+              '(lambda ()
+                (nth 3 (nth i end-drawlist))
+              )
+            )
+          )
+          (if (and (not (vl-catch-all-error-p catch-result))
+                   (= catch-result tmp-gjx))
+            (progn
+              (setq tmp-lst (cons (nth i end-drawlist) tmp-lst))
+              (setq end-drawlist (vl-remove (nth i end-drawlist) end-drawlist))
+            )
+            (setq i (1+ i))
+          )
+        )
+        (setq end (append (list tmp-lst) end))
+        (setq i 0)
       )
+      end
     )
-    (setq end (append (list tmp-lst) end))
-    (setq i 0)
   )
-  end
 )
 
 ;;;---------------------------------------------------------------
@@ -4324,21 +5031,42 @@
 ;;;        name - block name
 ;;;  Side effects: sets *sysdiag-gj-heigh* and *sysdiag-gj-length*
 ;;;---------------------------------------------------------------
-(defun sysdiag-insert-block (pts name / tmp-block p1 p2 gj-pts gj-jidian)
+(defun sysdiag-insert-block (pts name / tmp-block p1 p2 gj-pts gj-jidian bbox-result)
   (command-s "_.insert" name pts "" "" 0)
   (setq tmp-block (entlast))
-  (vla-GetBoundingBox (vlax-ename->vla-object tmp-block) 'p1 'p2)
-  (setq p1 (vlax-safearray->list p1))
-  (setq p2 (vlax-safearray->list p2))
-  (setq *sysdiag-gj-heigh* (- (cadr p2) (cadr p1)))
-  (setq *sysdiag-gj-length* (- (car p2) (car p1)))
-  ;; Calculate geometric center (vertical midpoint)
-  (setq gj-pts (polar p1 (/ pi 2) (/ *sysdiag-gj-heigh* 2.0)))
-  ;; Get actual insertion point of the block
-  (setq gj-jidian (cdr (assoc 10 (entget tmp-block))))
-  ;; Move block so geometric center aligns with insertion point
-  (command-s "_.move" (entlast) "" gj-pts gj-jidian)
-  (princ)
+  (if (null tmp-block)
+    (progn
+      (princ "\n[sysdiag] Error: entlast returned nil after block insert")
+      nil
+    )
+    (progn
+      (setq bbox-result
+        (vl-catch-all-apply
+          'vla-GetBoundingBox
+          (list (vlax-ename->vla-object tmp-block) 'p1 'p2)
+        )
+      )
+      (if (vl-catch-all-error-p bbox-result)
+        (progn
+          (princ (strcat "\n[sysdiag] Error: GetBoundingBox failed - "
+                         (vl-catch-all-error-message bbox-result)))
+          (setq *sysdiag-gj-heigh* nil)
+          (setq *sysdiag-gj-length* nil)
+          nil
+        )
+        (progn
+          (setq p1 (vlax-safearray->list p1))
+          (setq p2 (vlax-safearray->list p2))
+          (setq *sysdiag-gj-heigh* (- (cadr p2) (cadr p1)))
+          (setq *sysdiag-gj-length* (- (car p2) (car p1)))
+          (setq gj-pts (polar p1 (/ pi 2) (/ *sysdiag-gj-heigh* 2.0)))
+          (setq gj-jidian (cdr (assoc 10 (entget tmp-block))))
+          (command-s "_.move" (entlast) "" gj-pts gj-jidian)
+          (princ)
+        )
+      )
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -4355,87 +5083,79 @@
                                        tmp-drawblockname tmp-textpts
                                        tmp-textstr tmp-namepts i m
                                        tmp-draw)
-  (setq cm (getvar "cmdecho"))
-  (setq os (getvar "osmode"))
-  (setvar "cmdecho" 0)
-  (setvar "osmode" 0)
-  (setvar "clayer" "0")
-  (setq end lst)
-  (setq i 0)
-  (setq m 0)
-
-  ;; Process each group (column)
-  (repeat (length end)
-    ;; Get current group and sort by camera name number (ascending)
-    (setq tmp-draw (nth m end))
-    (setq tmp-draw
-      (vl-sort tmp-draw
-        '(lambda (e1 e2)
-           (< (atof (sysdiag-extract-number (caddr e1)))
-              (atof (sysdiag-extract-number (caddr e2)))))))
-
-    ;; Set starting Y position for this column
-    (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
-
-    ;; Draw each device in this group (rows)
-    (repeat (length tmp-draw)
-      ;; Draw horizontal connection line
-      (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
-      (command-s "_.pline" htd-p1 end-p1 "")
-
-      ;; Get block info
-      (setq tmp-drawblock (nth i tmp-draw))
-      (setq tmp-drawblockname (nth 1 tmp-drawblock))
-
-      ;; Cable length label position (slightly right of start)
-      (setq tmp-textpts (polar htd-p1 0.2 250.0))
-      ;; Cable length label: "SXTGDDL-XXm"
-      (setq tmp-textstr
-        (strcat *sysdiag-cable-label-prefix* "-"
-                (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
-                "m"))
-
-      ;; Insert camera block at end point
-      (sysdiag-insert-block end-p1 tmp-drawblockname)
-
-      ;; Camera name label (right of block)
-      (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
-      (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
-      (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 2 tmp-drawblock))
-
-      (setq i (1+ i))
-
-      ;; Move to next row (downward)
-      (if (> (+ *sysdiag-gj-heigh* 100.0) *sysdiag-min-row-spacing*)
-        (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
-        (setq htd-p1 (polar htd-p1 (* pi 1.5) *sysdiag-min-row-spacing*))
-      )
+  (if (null lst)
+    (progn
+      (princ "\n[sysdiag] Error: nil list passed to sysdiag-draw-classified")
+      nil
     )
+    (progn
+      (setq cm (getvar "cmdecho"))
+      (setq os (getvar "osmode"))
+      (setvar "cmdecho" 0)
+      (setvar "osmode" 0)
+      (setvar "clayer" "0")
+      (setq end lst)
+      (setq i 0)
+      (setq m 0)
 
-    ;; Draw rectangle around this group
-    ;; Height = distance from htd to htd-p1 + 200 margin
-    (setq htd-pt1 (polar htd (* pi 1.5)
-                         (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
-    (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-    (setq htd-pt3 (polar htd-pt2 (* pi 0.5)
-                         (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
-    (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+      (repeat (length end)
+        (setq tmp-draw (nth m end))
+        (setq tmp-draw
+          (vl-sort tmp-draw
+            '(lambda (e1 e2)
+               (< (atof (sysdiag-extract-number (caddr e1)))
+                  (atof (sysdiag-extract-number (caddr e2)))))))
 
-    ;; Junction name label (upper-left of rectangle)
-    (command-s "_.text" (polar htd (* pi 0.7) 400.0)
-               *sysdiag-text-height* 0 (nth 3 (car tmp-draw)))
+        (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
 
-    ;; Move to next column (rightward)
-    (setq m (1+ m))
-    (setq i 0)
-    (setq htd (polar htd 0 *sysdiag-column-spacing*))
+        (repeat (length tmp-draw)
+          (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
+          (command-s "_.pline" htd-p1 end-p1 "")
+
+          (setq tmp-drawblock (nth i tmp-draw))
+          (setq tmp-drawblockname (nth 1 tmp-drawblock))
+
+          (setq tmp-textpts (polar htd-p1 0.2 250.0))
+          (setq tmp-textstr
+            (strcat *sysdiag-cable-label-prefix* "-"
+                    (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
+                    "m"))
+
+          (sysdiag-insert-block end-p1 tmp-drawblockname)
+
+          (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
+          (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
+          (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 2 tmp-drawblock))
+
+          (setq i (1+ i))
+
+          (if (> (+ *sysdiag-gj-heigh* 100.0) *sysdiag-min-row-spacing*)
+            (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
+            (setq htd-p1 (polar htd-p1 (* pi 1.5) *sysdiag-min-row-spacing*))
+          )
+        )
+
+        (setq htd-pt1 (polar htd (* pi 1.5)
+                             (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
+        (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
+        (setq htd-pt3 (polar htd-pt2 (* pi 0.5)
+                             (+ (- (cadr htd) (cadr htd-p1)) 200.0)))
+        (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+
+        (command-s "_.text" (polar htd (* pi 0.7) 400.0)
+                   *sysdiag-text-height* 0 (nth 3 (car tmp-draw)))
+
+        (setq m (1+ m))
+        (setq i 0)
+        (setq htd (polar htd 0 *sysdiag-column-spacing*))
+      )
+
+      (setq *sysdiag-gj-heigh* nil)
+      (setvar "cmdecho" cm)
+      (setvar "osmode" os)
+      T
+    )
   )
-
-  ;; Clear block height/width
-  (setq *sysdiag-gj-heigh* nil)
-  (setvar "cmdecho" cm)
-  (setvar "osmode" os)
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -4451,85 +5171,77 @@
                                 tmp-drawblockname tmp-textpts
                                 tmp-textstr tmp-namepts i m
                                 tmp-draw actual-height)
-  (setq cm (getvar "cmdecho"))
-  (setq os (getvar "osmode"))
-  (setvar "cmdecho" 0)
-  (setvar "osmode" 0)
-  (setvar "clayer" "0")
-  (setq end lst)
-  (setq i 0)
-  (setq m 0)
-
-  ;; Sort entire list by name (2nd element) ascending
-  (setq end (vl-sort end '(lambda (e1 e2) (< (cadr e1) (cadr e2)))))
-
-  ;; Set starting Y position
-  (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
-
-  ;; Draw each HJX device
-  (repeat (length end)
-    ;; Draw horizontal connection line
-    (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
-    (command-s "_.pline" htd-p1 end-p1 "")
-
-    ;; Get block info
-    (setq tmp-drawblock (nth m end))
-    ;; Block name from entity
-    (setq tmp-drawblockname
-      (cdr (assoc 2 (entget (nth 2 tmp-drawblock)))))
-
-    ;; Cable label position
-    (setq tmp-textpts (polar htd-p1 0.2 250.0))
-    ;; Cable label: "HJXXL-XXm"
-    (setq tmp-textstr
-      (strcat "HJXXL-"
-              (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
-              "m"))
-
-    ;; Insert block
-    (sysdiag-insert-block end-p1 tmp-drawblockname)
-
-    ;; Name label (right of block)
-    (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
-    (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
-    (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 1 tmp-drawblock))
-
-    (setq i (1+ i))
-
-    ;; Move to next row
-    (if (> (+ *sysdiag-gj-heigh* 100.0) 550.0)
-      (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
-      (setq htd-p1 (polar htd-p1 (* pi 1.5) 100.0))
-    )
-
-    (setq m (1+ m))
-    (setq i 0)
-  )
-
-  ;; Draw rectangle around all HJX devices
-  (setq actual-height (- (cadr htd) (cadr htd-p1)))
-  (setq htd-pt1 (polar htd (* pi 1.5) actual-height))
-  (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-  (setq htd-pt3 (polar htd-pt2 (* pi 0.5) actual-height))
-
-  ;; If height exceeds 18800, use actual height; otherwise use 18800
-  (if (> actual-height 18800.0)
-    (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+  (if (null lst)
     (progn
-      (setq htd-pt1 (polar htd (* pi 1.5) 18800.0))
+      (princ "\n[sysdiag] Error: nil list passed to sysdiag-draw-hjx")
+      nil
+    )
+    (progn
+      (setq cm (getvar "cmdecho"))
+      (setq os (getvar "osmode"))
+      (setvar "cmdecho" 0)
+      (setvar "osmode" 0)
+      (setvar "clayer" "0")
+      (setq end lst)
+      (setq i 0)
+      (setq m 0)
+
+      (setq end (vl-sort end '(lambda (e1 e2) (< (cadr e1) (cadr e2)))))
+
+      (setq htd-p1 (polar htd *sysdiag-init-angle* *sysdiag-init-y-offset*))
+
+      (repeat (length end)
+        (setq end-p1 (polar htd-p1 0 *sysdiag-block-offset*))
+        (command-s "_.pline" htd-p1 end-p1 "")
+
+        (setq tmp-drawblock (nth m end))
+        (setq tmp-drawblockname
+          (cdr (assoc 2 (entget (nth 2 tmp-drawblock)))))
+
+        (setq tmp-textpts (polar htd-p1 0.2 250.0))
+        (setq tmp-textstr
+          (strcat "HJXXL-"
+                  (rtos (fix (/ (nth 0 tmp-drawblock) *sysdiag-dist-unit*)) 2 0)
+                  "m"))
+
+        (sysdiag-insert-block end-p1 tmp-drawblockname)
+
+        (setq tmp-namepts (polar end-p1 0 (+ *sysdiag-gj-length* 100.0)))
+        (command-s "_.text" tmp-textpts *sysdiag-text-height* 0 tmp-textstr)
+        (command-s "_.text" tmp-namepts *sysdiag-text-height* 0 (nth 1 tmp-drawblock))
+
+        (setq i (1+ i))
+
+        (if (> (+ *sysdiag-gj-heigh* 100.0) 550.0)
+          (setq htd-p1 (polar htd-p1 (* pi 1.5) (+ *sysdiag-gj-heigh* 100.0)))
+          (setq htd-p1 (polar htd-p1 (* pi 1.5) 100.0))
+        )
+
+        (setq m (1+ m))
+        (setq i 0)
+      )
+
+      (setq actual-height (- (cadr htd) (cadr htd-p1)))
+      (setq htd-pt1 (polar htd (* pi 1.5) actual-height))
       (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
-      (setq htd-pt3 (polar htd-pt2 (* pi 0.5) 18800.0))
-      (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+      (setq htd-pt3 (polar htd-pt2 (* pi 0.5) actual-height))
+
+      (if (> actual-height 18800.0)
+        (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+        (progn
+          (setq htd-pt1 (polar htd (* pi 1.5) 18800.0))
+          (setq htd-pt2 (polar htd-pt1 0 *sysdiag-rect-width*))
+          (setq htd-pt3 (polar htd-pt2 (* pi 0.5) 18800.0))
+          (command-s "_.pline" htd htd-pt1 htd-pt2 htd-pt3 "c")
+        )
+      )
+
+      (setq *sysdiag-gj-heigh* nil)
+      (setvar "cmdecho" cm)
+      (setvar "osmode" os)
+      T
     )
   )
-
-  ;; Note: draw_BDXrec (semi-fixed diagram) is NOT included
-  ;; per refactoring requirement to remove semi-fixed diagram drawing
-
-  (setq *sysdiag-gj-heigh* nil)
-  (setvar "cmdecho" cm)
-  (setvar "osmode" os)
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -4577,7 +5289,7 @@
 ;;;         layer    - layer name
 ;;;---------------------------------------------------------------
 (defun sysdiag-draw-cable-line (start-pt end-pt length layer / mid-pt)
-  (command-s "_.line" start-pt end-pt "")
+  (entmakex (list (cons 0 "LINE") (cons 8 layer) (cons 10 start-pt) (cons 11 end-pt)))
   (setq mid-pt (list (/ (+ (car start-pt) (car end-pt)) 2.0)
                      (/ (+ (cadr start-pt) (cadr end-pt)) 2.0)
                      0.0))
@@ -4601,10 +5313,8 @@
   (princ (strcat "\n[sysdiag] Drawing system diagram for "
                  (itoa (length device-list)) " devices..."))
 
-  ;; Group by junction
   (setq grouped (sysdiag-group-by-junction device-list))
 
-  ;; Draw each junction group
   (setq current-y (cadr ins-pt))
   (foreach group grouped
     (setq jnx-devices (sysdiag-sort-devices (cdr group)))
@@ -4625,12 +5335,10 @@
   (setq x (car ins-pt))
   (setq y start-y)
 
-  ;; Draw junction box
   (command-s "_.rectang" (list x y 0.0) (list (+ x 500.0) (+ y 300.0) 0.0))
   (command-s "_.text" "_j" "_m" (list (+ x 250.0) (+ y 150.0) 0.0)
              *sysdiag-text-height* "0" "Junction")
 
-  ;; Draw each device connection
   (foreach dev devices
     (setq y (- y *sysdiag-min-row-spacing*))
     (sysdiag-draw-cable-line (list (+ x 500.0) (+ y 150.0) 0.0)
@@ -4774,11 +5482,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M09_system_diagram.lsp
-;;;  Next: M10_parameter_io.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M10 - Parameter I/O Module
 ;;;  Read and write configuration files
@@ -4801,14 +5504,19 @@
 ;;;  Returns: list of substrings
 ;;;---------------------------------------------------------------
 (defun param-string-split (str delimiter / result pos)
-  (if (null delimiter) (setq delimiter ","))
-  (setq result nil)
-  (while (setq pos (vl-string-search delimiter str))
-    (setq result (cons (substr str 1 pos) result))
-    (setq str (substr str (+ pos 2)))
+  (if (or (null str) (= str ""))
+    nil
+    (progn
+      (if (null delimiter) (setq delimiter ","))
+      (setq result nil)
+      (while (setq pos (vl-string-search delimiter str))
+        (setq result (cons (substr str 1 pos) result))
+        (setq str (substr str (+ pos 2)))
+      )
+      (setq result (cons str result))
+      (reverse result)
+    )
   )
-  (setq result (cons str result))
-  (reverse result)
 )
 
 ;;;---------------------------------------------------------------
@@ -4839,12 +5547,10 @@
 (defun param-string-trim (str / start end)
   (setq start 1)
   (setq end (strlen str))
-  ;; Trim from start
   (while (and (<= start end)
               (wcmatch (substr str start 1) "[ ]"))
     (setq start (1+ start))
   )
-  ;; Trim from end
   (while (and (>= end start)
               (wcmatch (substr str end 1) "[ ]"))
     (setq end (1- end))
@@ -4863,7 +5569,6 @@
 ;;;---------------------------------------------------------------
 (defun param-parse-line (line / pos name values)
   (setq line (param-string-trim line))
-  ;; Skip empty lines and comments
   (if (or (= line "") (= (substr line 1 1) ";"))
     nil
     (progn
@@ -4897,28 +5602,53 @@
 ;;;  Args: filename - file path (nil = use default)
 ;;;  Returns: association list of parameters or nil
 ;;;---------------------------------------------------------------
-(defun param-load (filename / fp line params parsed)
+(defun param-load (filename / fp line params parsed read-result)
   (if (null filename)
     (setq filename *param-default-file*)
   )
-  (setq params nil)
-  (setq fp (open filename "r"))
-  (if fp
+  (if (null filename)
     (progn
-      (princ (strcat "\n[param] Loading from " filename "..."))
-      (while (setq line (read-line fp))
-        (setq parsed (param-parse-line line))
-        (if parsed
-          (setq params (cons parsed params))
-        )
-      )
-      (close fp)
-      (princ (strcat "\n[param] Loaded " (itoa (length params)) " parameters."))
-      (reverse params)
+      (princ "\n[param] Error: filename is nil after default lookup")
+      nil
     )
     (progn
-      (princ (strcat "\n[param] File not found: " filename))
-      nil
+      (setq params nil)
+      (setq read-result
+        (vl-catch-all-apply
+          '(lambda ()
+            (setq fp (open filename "r"))
+            (if fp
+              (progn
+                (princ (strcat "\n[param] Loading from " filename "..."))
+                (while (setq line (read-line fp))
+                  (setq parsed (param-parse-line line))
+                  (if parsed
+                    (setq params (cons parsed params))
+                  )
+                )
+                (close fp)
+                (princ (strcat "\n[param] Loaded " (itoa (length params)) " parameters."))
+                (reverse params)
+              )
+              (progn
+                (princ (strcat "\n[param] File not found: " filename))
+                nil
+              )
+            )
+          )
+        )
+      )
+      (if (vl-catch-all-error-p read-result)
+        (progn
+          (princ (strcat "\n[param] Error reading file: "
+                         (vl-catch-all-error-message read-result)))
+          (if (and fp (= (type fp) 'FILE))
+            (close fp)
+          )
+          nil
+        )
+        read-result
+      )
     )
   )
 )
@@ -4930,30 +5660,53 @@
 ;;;         filename - file path (nil = use default)
 ;;;  Returns: T on success, nil on failure
 ;;;---------------------------------------------------------------
-(defun param-save (params filename / fp)
-  (if (null filename)
-    (setq filename *param-default-file*)
-  )
-  (setq fp (open filename "w"))
-  (if fp
+(defun param-save (params filename / fp write-result)
+  (if (null params)
     (progn
-      (princ (strcat "\n[param] Saving to " filename "..."))
-      ;; Write header
-      (princ "; CCTV System Parameters\n" fp)
-      (princ "; Auto-generated file\n" fp)
-      (princ "\n" fp)
-      ;; Write parameters
-      (foreach param params
-        (princ (param-format-line (car param) (cadr param)) fp)
-        (princ "\n" fp)
-      )
-      (close fp)
-      (princ (strcat "\n[param] Saved " (itoa (length params)) " parameters."))
-      T
+      (princ "\n[param] Error: nil params passed to param-save")
+      nil
     )
     (progn
-      (princ (strcat "\n[param] Cannot write to: " filename))
-      nil
+      (if (null filename)
+        (setq filename *param-default-file*)
+      )
+      (setq write-result
+        (vl-catch-all-apply
+          '(lambda ()
+            (setq fp (open filename "w"))
+            (if fp
+              (progn
+                (princ (strcat "\n[param] Saving to " filename "..."))
+                (princ "; CCTV System Parameters\n" fp)
+                (princ "; Auto-generated file\n" fp)
+                (princ "\n" fp)
+                (foreach param params
+                  (princ (param-format-line (car param) (cadr param)) fp)
+                  (princ "\n" fp)
+                )
+                (close fp)
+                (princ (strcat "\n[param] Saved " (itoa (length params)) " parameters."))
+                T
+              )
+              (progn
+                (princ (strcat "\n[param] Cannot write to: " filename))
+                nil
+              )
+            )
+          )
+        )
+      )
+      (if (vl-catch-all-error-p write-result)
+        (progn
+          (princ (strcat "\n[param] Error writing file: "
+                         (vl-catch-all-error-message write-result)))
+          (if (and fp (= (type fp) 'FILE))
+            (close fp)
+          )
+          nil
+        )
+        write-result
+      )
     )
   )
 )
@@ -4966,8 +5719,13 @@
 ;;;  Returns: list of values or nil
 ;;;---------------------------------------------------------------
 (defun param-get (params name / entry)
-  (setq entry (assoc name params))
-  (if entry (cadr entry) nil)
+  (if (null params)
+    nil
+    (progn
+      (setq entry (assoc name params))
+      (if entry (cadr entry) nil)
+    )
+  )
 )
 
 ;;;---------------------------------------------------------------
@@ -4979,10 +5737,15 @@
 ;;;  Returns: updated parameter list
 ;;;---------------------------------------------------------------
 (defun param-set (params name values / entry)
-  (setq entry (assoc name params))
-  (if entry
-    (subst (list name values) entry params)
-    (cons (list name values) params)
+  (if (null params)
+    (list (list name values))
+    (progn
+      (setq entry (assoc name params))
+      (if entry
+        (subst (list name values) entry params)
+        (cons (list name values) params)
+      )
+    )
   )
 )
 
@@ -5029,7 +5792,6 @@
   (if (= str "")
     ""
     (progn
-      ;; Check if string represents a number
       (setq is-num T)
       (foreach ch (vl-string->list str)
         (if (and (/= ch 45) (/= ch 46) (< ch 48) (> ch 57))
@@ -5186,8 +5948,8 @@
   (if (and loaded
            (= (length loaded) 4)
            (param-get loaded "camera_blocks"))
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       ;; Cleanup
       (vl-file-delete test-file)
@@ -5200,8 +5962,8 @@
   (setq old-file (param-get-default-file))
   (param-set-default-file "new_params.txt")
   (if (= (param-get-default-file) "new_params.txt")
-    (progn 
-      (princ " PASS") 
+    (progn
+      (princ " PASS")
       (setq passed (1+ passed))
       (param-set-default-file old-file)
     )
@@ -5227,11 +5989,6 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M10_parameter_io.lsp
-;;;  Next: M11_gui_handlers.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M11 - GUI Handlers Module (Simplified)
 ;;;  Command-line based user interaction
@@ -5249,7 +6006,8 @@
 (defun gui-select-blocks (prompt / ss names i name)
   (princ (strcat "\n" prompt))
   (setq ss (ssget '((0 . "INSERT"))))
-  (if ss
+  (if (null ss)
+    nil
     (progn
       (setq names nil)
       (setq i 0)
@@ -5262,7 +6020,6 @@
       )
       names
     )
-    nil
   )
 )
 
@@ -5312,100 +6069,107 @@
 ;;;  Matches original OpenDCL form fields
 ;;;---------------------------------------------------------------
 (defun gui-configure-workflow (/ cam-blocks jnx-blocks tray-layer pipe-layer
-                                     name-layers coef jnx-bias room-bias)
-  (princ "\n\n========================================")
-  (princ "\n  CCTV System Configuration")
-  (princ "\n========================================")
+                                     name-layers coef jnx-bias room-bias result)
+  (setq result
+    (vl-catch-all-apply
+      '(lambda ()
+        (progn
+          (princ "\n\n========================================")
+          (princ "\n  CCTV System Configuration")
+          (princ "\n========================================")
 
-  ;; Step 1: Camera blocks
-  (princ "\n\n[1/8] Camera block selection")
-  (princ "\n  Select camera block(s) in drawing:")
-  (setq cam-blocks (gui-select-blocks "Select camera blocks: "))
-  (if cam-blocks
-    (progn
-      (main-set-camera-blocks cam-blocks)
-      (princ (strcat "\n  Selected " (itoa (length cam-blocks)) " block type(s)."))
+          (princ "\n\n[1/8] Camera block selection")
+          (princ "\n  Select camera block(s) in drawing:")
+          (setq cam-blocks (gui-select-blocks "Select camera blocks: "))
+          (if cam-blocks
+            (progn
+              (main-set-camera-blocks cam-blocks)
+              (princ (strcat "\n  Selected " (itoa (length cam-blocks)) " block type(s)."))
+            )
+            (princ "\n  Warning: No camera blocks selected.")
+          )
+
+          (princ "\n\n[2/8] Camera name text layers")
+          (princ "\n  Layers containing camera name text labels.")
+          (setq name-layers (gui-select-layers-multi "Camera name text layers: "))
+          (if name-layers
+            (progn
+              (main-set-camera-name-layers name-layers)
+              (princ (strcat "\n  Set " (itoa (length name-layers)) " name layer(s)."))
+            )
+            (princ "\n  No name layers set.")
+          )
+
+          (princ "\n\n[3/8] Junction box block selection")
+          (princ "\n  Select junction box block(s) in drawing:")
+          (setq jnx-blocks (gui-select-blocks "Select junction box blocks: "))
+          (if jnx-blocks
+            (progn
+              (main-set-junction-blocks jnx-blocks)
+              (princ (strcat "\n  Selected " (itoa (length jnx-blocks)) " block type(s)."))
+            )
+            (princ "\n  Warning: No junction blocks selected.")
+          )
+
+          (princ "\n\n[4/8] Cable tray layer (MLINE)")
+          (setq tray-layer (gui-select-layer "Cable tray MLINE layer name: "))
+          (if tray-layer
+            (progn
+              (main-set-cable-tray-layer tray-layer)
+              (main-bltc-add tray-layer)
+              (princ (strcat "\n  Cable tray layer: " tray-layer))
+            )
+            (princ "\n  No cable tray layer set.")
+          )
+
+          (princ "\n\n[5/8] Pipe layer (optional)")
+          (setq pipe-layer (gui-select-layer "Pipe layer name (Enter to skip): "))
+          (if pipe-layer
+            (progn
+              (main-set-pipe-layer pipe-layer)
+              (princ (strcat "\n  Pipe layer: " pipe-layer))
+            )
+            (princ "\n  No pipe layer set.")
+          )
+
+          (princ "\n\n[6/8] Cable length coefficient")
+          (setq coef (getreal "\n  Enter coefficient (default 1.2): "))
+          (if coef
+            (main-set-cable-coefficient coef)
+            (main-set-cable-coefficient 1.2)
+          )
+          (princ (strcat "\n  Coefficient: " (rtos *main-cable-coefficient* 2 2)))
+
+          (princ "\n\n[7/8] Distance biases")
+          (setq jnx-bias (getreal "\n  Junction bias (default 10000): "))
+          (setq room-bias (getreal "\n  Room entry bias (default 25000): "))
+          (main-set-biases
+            (if jnx-bias jnx-bias 10000.0)
+            (if room-bias room-bias 25000.0))
+          (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
+          (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
+
+          (princ "\n\n[8/8] Room entry points (optional)")
+          (if (= (getstring "\n  Add room entry points? (y/n): ") "y")
+            (c:CCTV-RoomPts)
+            (princ "\n  No room points set.")
+          )
+
+          (princ "\n\n========================================")
+          (princ "\n  Configuration complete!")
+          (princ "\n========================================")
+          T
+        )
+      )
     )
-    (princ "\n  Warning: No camera blocks selected.")
   )
-
-  ;; Step 2: Camera name text layers
-  (princ "\n\n[2/8] Camera name text layers")
-  (princ "\n  Layers containing camera name text labels.")
-  (setq name-layers (gui-select-layers-multi "Camera name text layers: "))
-  (if name-layers
+  (if (vl-catch-all-error-p result)
     (progn
-      (main-set-camera-name-layers name-layers)
-      (princ (strcat "\n  Set " (itoa (length name-layers)) " name layer(s)."))
+      (princ (strcat "\nConfiguration error: " (vl-catch-all-error-message result)))
+      nil
     )
-    (princ "\n  No name layers set.")
+    result
   )
-
-  ;; Step 3: Junction box blocks
-  (princ "\n\n[3/8] Junction box block selection")
-  (princ "\n  Select junction box block(s) in drawing:")
-  (setq jnx-blocks (gui-select-blocks "Select junction box blocks: "))
-  (if jnx-blocks
-    (progn
-      (main-set-junction-blocks jnx-blocks)
-      (princ (strcat "\n  Selected " (itoa (length jnx-blocks)) " block type(s)."))
-    )
-    (princ "\n  Warning: No junction blocks selected.")
-  )
-
-  ;; Step 4: Cable tray (MLINE) layer
-  (princ "\n\n[4/8] Cable tray layer (MLINE)")
-  (setq tray-layer (gui-select-layer "Cable tray MLINE layer name: "))
-  (if tray-layer
-    (progn
-      (main-set-cable-tray-layer tray-layer)
-      (main-bltc-add tray-layer)
-      (princ (strcat "\n  Cable tray layer: " tray-layer))
-    )
-    (princ "\n  No cable tray layer set.")
-  )
-
-  ;; Step 5: Pipe layer (optional)
-  (princ "\n\n[5/8] Pipe layer (optional)")
-  (setq pipe-layer (gui-select-layer "Pipe layer name (Enter to skip): "))
-  (if pipe-layer
-    (progn
-      (main-set-pipe-layer pipe-layer)
-      (princ (strcat "\n  Pipe layer: " pipe-layer))
-    )
-    (princ "\n  No pipe layer set.")
-  )
-
-  ;; Step 6: Cable coefficient
-  (princ "\n\n[6/8] Cable length coefficient")
-  (setq coef (getreal "\n  Enter coefficient (default 1.2): "))
-  (if coef
-    (main-set-cable-coefficient coef)
-    (main-set-cable-coefficient 1.2)
-  )
-  (princ (strcat "\n  Coefficient: " (rtos *main-cable-coefficient* 2 2)))
-
-  ;; Step 7: Distance biases
-  (princ "\n\n[7/8] Distance biases")
-  (setq jnx-bias (getreal "\n  Junction bias (default 10000): "))
-  (setq room-bias (getreal "\n  Room entry bias (default 25000): "))
-  (main-set-biases
-    (if jnx-bias jnx-bias 10000.0)
-    (if room-bias room-bias 25000.0))
-  (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
-  (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
-
-  ;; Step 8: Room entry points (optional)
-  (princ "\n\n[8/8] Room entry points (optional)")
-  (if (= (getstring "\n  Add room entry points? (y/n): ") "y")
-    (c:CCTV-RoomPts)
-    (princ "\n  No room points set.")
-  )
-
-  (princ "\n\n========================================")
-  (princ "\n  Configuration complete!")
-  (princ "\n========================================")
-  T
 )
 
 ;;;---------------------------------------------------------------
@@ -5429,7 +6193,9 @@
       (gui-configure-workflow)
     )
   )
-  (main-run-workflow)
+  (if *main-camera-blocks*
+    (main-run-workflow)
+  )
   (princ)
 )
 
@@ -5470,20 +6236,21 @@
 ;;;  Set room entry points interactively
 ;;;  Equivalent to original room point selection
 ;;;---------------------------------------------------------------
-(defun c:CCTV-RoomPts (/ pt pts cont)
+(defun c:CCTV-RoomPts (/ pt pts cont result)
   (setq pts nil)
   (setq cont T)
   (princ "\n=== Room Entry Points ===")
   (princ "\n  Pick room entry points. Press ESC or Enter to finish.")
   (while cont
-    (setq pt (getpoint "\n  Pick room entry point (Enter to finish): "))
-    (if pt
+    (setq result (vl-catch-all-apply 'getpoint '("\n  Pick room entry point (Enter to finish): ")))
+    (if (or (vl-catch-all-error-p result) (null result))
+      (setq cont nil)
       (progn
+        (setq pt result)
         (setq pts (cons pt pts))
         (princ (strcat "  Added point: (" (rtos (car pt) 2 0) ","
                        (rtos (cadr pt) 2 0) ")"))
       )
-      (setq cont nil)
     )
   )
   (if pts
@@ -5527,7 +6294,7 @@
         (progn
           (equiv-add-pair pt1 pt2)
           (princ "\n  Equivalent point pair added.")
-          (princ (strcat "\n  Total pairs: " (itoa (length *equiv-points*)))))
+          (princ (strcat "\n  Total pairs: " (itoa (equiv-count)))))
         (princ "\n  Cancelled.")
       )
     )
@@ -5591,6 +6358,9 @@
   (princ "\n\n========================================")
   (princ "\n  Current CCTV Configuration")
   (princ "\n========================================")
+  (if (null *main-camera-blocks*)
+    (princ "\n  WARNING: No camera blocks configured. Run CCTV-Config first.")
+  )
   (princ (strcat "\n  Camera blocks: "
                  (if *main-camera-blocks*
                    (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-camera-blocks*))
@@ -5611,7 +6381,7 @@
   (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
   (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
   (princ (strcat "\n  Room points: " (itoa (length *main-room-points*))))
-  (princ (strcat "\n  Equiv point pairs: " (itoa (length *equiv-points*))))
+  (princ (strcat "\n  Equiv point pairs: " (itoa (equiv-count))))
   (princ (strcat "\n  MLINE area: "
                  (if *main-mline-set*
                    (strcat (itoa (sslength *main-mline-set*)) " MLINE(s)")
@@ -5672,38 +6442,33 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M11_gui_handlers.lsp
-;;;  Next: M12_main.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M12 - Main Module
 ;;;  Main entry point and workflow coordination
 ;;;  Refactored to match original drawCCTV logic
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01-M11
+;;;  DEPENDENCIES: M00-M11
+;;;  LOAD ORDER: M00, M01, M02, M03, M04, M05, M06, M07, M08, M09, M10, M11, M12
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
 ;;;  Global Configuration Variables
 ;;;---------------------------------------------------------------
-(setq *main-camera-blocks* nil)         ; List of camera block names
-(setq *main-camera-name-layers* nil)    ; List of camera name text layers
-(setq *main-junction-blocks* nil)       ; List of junction box block names
-(setq *main-cable-tray-layer* nil)      ; Cable tray layer name
-(setq *main-pipe-layer* nil)            ; Pipe layer name (optional)
-(setq *main-room-points* nil)           ; List of room entry points
-(setq *main-equiv-points* nil)          ; List of equivalent point pairs
-(setq *main-cable-coefficient* 1.2)     ; Cable length coefficient
-(setq *main-junction-bias* 10000.0)     ; Junction box distance bias
-(setq *main-room-bias* 25000.0)         ; Room entry distance bias
-(setq *main-temp-layer* "TEMP_CCTV")    ; Temporary layer name (was test1)
-(setq *main-temp-layer2* "TEMP_CCTV2")  ; Second temp layer (was test2)
-(setq *main-mline-set* nil)             ; MLINE selection set (user area pick)
-(setq *main-mline-p1* nil)              ; MLINE area corner 1
-(setq *main-mline-p2* nil)              ; MLINE area corner 2
+(setq *main-camera-blocks* nil)
+(setq *main-camera-name-layers* nil)
+(setq *main-junction-blocks* nil)
+(setq *main-cable-tray-layer* nil)
+(setq *main-pipe-layer* nil)
+(setq *main-room-points* nil)
+(setq *main-cable-coefficient* 1.2)
+(setq *main-junction-bias* 10000.0)
+(setq *main-room-bias* 25000.0)
+(setq *main-temp-layer* "TEMP_CCTV")
+(setq *main-temp-layer2* "TEMP_CCTV2")
+(setq *main-mline-set* nil)
+(setq *main-mline-p1* nil)
+(setq *main-mline-p2* nil)
 
 ;;; bltc - protected layer list (layers to keep visible)
 (setq *main-bltc* nil)
@@ -5778,7 +6543,6 @@
 ;;;---------------------------------------------------------------
 (defun main-gbtc (/ layers tcmb layerName)
   (vl-load-com)
-  ;; Record currently hidden layers
   (setq *main-hidden-layers* nil)
   (setq layers (vla-get-layers (vla-get-activedocument (vlax-get-acad-object))))
   (vlax-for layer layers
@@ -5786,12 +6550,10 @@
       (setq *main-hidden-layers* (cons (vla-get-name layer) *main-hidden-layers*))
     )
   )
-  ;; Build list of all layers
   (setq tcmb nil)
   (vlax-for layer layers
     (setq tcmb (cons (list (vla-get-name layer) layer) tcmb))
   )
-  ;; Turn off layers NOT in bltc
   (if *main-bltc*
     (progn
       (foreach ent *main-bltc*
@@ -5842,6 +6604,74 @@
 )
 
 ;;;---------------------------------------------------------------
+;;;  main-setup-temp-layer
+;;;  Create a temporary layer with error handling
+;;;  Returns T on success, nil on failure
+;;;---------------------------------------------------------------
+(defun main-setup-temp-layer (layer-name color / err-result)
+  (if (null layer-name)
+    (progn
+      (princ "\n[main] Setup temp layer: layer name is nil.")
+      nil
+    )
+    (progn
+      (setq err-result (vl-catch-all-apply
+        '(lambda ()
+          (if (null (tblsearch "LAYER" layer-name))
+            (command-s "_.layer" "_m" layer-name "_c" color layer-name "")
+          )
+          T
+        )))
+      (if (vl-catch-all-error-p err-result)
+        (progn
+          (princ (strcat "\n[main] Layer setup error for " layer-name ": "
+                         (vl-catch-all-error-message err-result)))
+          nil
+        )
+        err-result
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-cleanup-temp-layer
+;;;  Erase all entities on a temporary layer with error handling
+;;;  Returns T on success, nil on failure
+;;;---------------------------------------------------------------
+(defun main-cleanup-temp-layer (layer-name / clean-ss i tmp err-result)
+  (if (null layer-name)
+    (progn
+      (princ "\n[main] Cleanup temp layer: layer name is nil.")
+      nil
+    )
+    (progn
+      (setq err-result (vl-catch-all-apply
+        '(lambda ()
+          (setq i 0)
+          (setq clean-ss (ssget "x" (list (cons 8 layer-name))))
+          (if clean-ss
+            (repeat (sslength clean-ss)
+              (setq tmp (ssname clean-ss i))
+              (command-s "_.erase" tmp "")
+              (setq i (1+ i))
+            )
+          )
+          T
+        )))
+      (if (vl-catch-all-error-p err-result)
+        (progn
+          (princ (strcat "\n[main] Layer cleanup error for " layer-name ": "
+                         (vl-catch-all-error-message err-result)))
+          nil
+        )
+        err-result
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
 ;;;  main-init
 ;;;  Initialize global variables and create temp layers
 ;;;---------------------------------------------------------------
@@ -5849,14 +6679,9 @@
   (graph-init)
   (equiv-clear)
   (setq *main-bltc* nil)
-  ;; Create temp layers
-  (if (null (tblsearch "LAYER" *main-temp-layer*))
-    (command-s "_.layer" "_m" *main-temp-layer* "_c" "3" *main-temp-layer* "")
-  )
+  (main-setup-temp-layer *main-temp-layer* "3")
   (main-bltc-add *main-temp-layer*)
-  (if (null (tblsearch "LAYER" *main-temp-layer2*))
-    (command-s "_.layer" "_m" *main-temp-layer2* "_c" "3" *main-temp-layer2* "")
-  )
+  (main-setup-temp-layer *main-temp-layer2* "3")
   (main-bltc-add *main-temp-layer2*)
   T
 )
@@ -5866,16 +6691,9 @@
 ;;;  Cleanup temporary entities
 ;;;  Equivalent to original clean_creen
 ;;;---------------------------------------------------------------
-(defun main-cleanup (/ clean-ss i tmp)
-  (setq i 0)
-  (setq clean-ss (ssget "x" (list (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*)))))
-  (if clean-ss
-    (repeat (sslength clean-ss)
-      (setq tmp (ssname clean-ss i))
-      (command-s "_.erase" tmp "")
-      (setq i (1+ i))
-    )
-  )
+(defun main-cleanup (/ )
+  (main-cleanup-temp-layer *main-temp-layer*)
+  (main-cleanup-temp-layer *main-temp-layer2*)
   T
 )
 
@@ -5976,26 +6794,25 @@
   (princ "\n[main] Processing cable trays...")
   (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
 
-  ;; Convert MLINEs to LINEs
   (if *main-mline-set*
     (progn
-      ;; Use area-selected MLINEs
       (setq lines (mline-convert-selection *main-mline-set* *main-temp-layer*))
-      (princ (strcat "\n[main] Converted " (itoa (sslength *main-mline-set*)) " MLINEs (area)."))
+      (if lines
+        (princ (strcat "\n[main] Converted " (itoa (sslength *main-mline-set*)) " MLINEs (area)."))
+        (princ "\n[main] Warning: MLINE conversion returned nil.")
+      )
     )
     (progn
-      ;; Use entire layer
       (if *main-cable-tray-layer*
-        (setq lines (mline-process-all (list *main-cable-tray-layer*) *main-temp-layer* nil nil))
+        (progn
+          (setq lines (mline-process-all (list *main-cable-tray-layer*) *main-temp-layer* nil nil))
+          (if (null lines)
+            (princ "\n[main] Warning: mline-process-all returned nil.")
+          )
+        )
       )
     )
   )
-
-  ;; Remove duplicates
-  (dup-remove-all nil *main-temp-layer*)
-
-  ;; Break at intersections
-  (break-lines-all (list *main-temp-layer* *main-temp-layer2*))
 
   (princ "\n[main] Cable trays processed.")
   T
@@ -6005,21 +6822,222 @@
 ;;;  main-build-graph
 ;;;  Build graph from processed lines
 ;;;---------------------------------------------------------------
-(defun main-build-graph (/ ss gllst)
+(defun main-build-graph (/ ss gllst build-result)
   (princ "\n[main] Building graph...")
   (setq gllst (list (cons 0 "LINE") (cons 8 (strcat *main-temp-layer* "," *main-temp-layer2*))))
   (setq ss (ssget "x" gllst))
   (if (and ss (> (sslength ss) 0))
     (progn
-      (graph-build-from-lines ss nil)
-      (graph-floyd-compute)
-      (princ (strcat "\n[main] Graph: " (itoa (graph-get-node-count)) " nodes, "
-                     (itoa (graph-get-edge-count)) " edges."))
-      T
+      (setq build-result (graph-build-from-lines ss nil))
+      (if (null build-result)
+        (progn
+          (princ "\n[main] Error: graph-build-from-lines returned nil.")
+          nil
+        )
+        (progn
+          (graph-floyd-compute)
+          (princ (strcat "\n[main] Graph: " (itoa (graph-get-node-count)) " nodes, "
+                         (itoa (graph-get-edge-count)) " edges."))
+          T
+        )
+      )
     )
     (progn
       (princ "\n[main] Error: No lines found for graph.")
       nil
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch1
+;;;  Branch 1: No room points, has junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch1 (junction-ss / gjx-list gjx-name-list
+                                       i ent base-pt proj-info proj-pt proj-dist name
+                                       temp-ss)
+  (if (null junction-ss)
+    (progn
+      (princ "\n[main] Branch 1: junction selection set is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 1: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 1: No room, has junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq i 0)
+          (repeat (sslength junction-ss)
+            (setq ent (ssname junction-ss i))
+            (setq base-pt (block-get-base-point ent))
+            (if base-pt
+              (progn
+                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (if proj-info
+                  (progn
+                    (setq proj-pt (cadr proj-info))
+                    (setq proj-dist (caddr proj-info))
+                    (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 base-pt) (cons 11 proj-pt)))
+                    (setq name (block-get-name-from-text ent nil))
+                    (if (null name) (setq name "JNX"))
+                    (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
+                    (setq gjx-name-list (cons name gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+          (setq gjx-list (reverse gjx-list))
+          (setq gjx-name-list (reverse gjx-name-list))
+          (list gjx-list gjx-name-list)
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch2
+;;;  Branch 2: Has room points, has junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch2 (junction-ss room-pts / gjx-list gjx-name-list
+                                        i ent base-pt proj-info proj-pt proj-dist name
+                                        y tmp-pt temp-ss)
+  (if (or (null junction-ss) (null room-pts))
+    (progn
+      (princ "\n[main] Branch 2: junction-ss or room-pts is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 2: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 2: Has room, has junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq y 0)
+          (repeat (length room-pts)
+            (setq tmp-pt (nth y room-pts))
+            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (if proj-info
+              (progn
+                (setq proj-pt (cadr proj-info))
+                (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 tmp-pt) (cons 11 proj-pt)))
+                (if (= y 0)
+                  (progn
+                    (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
+                    (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq y (1+ y))
+          )
+          (setq y 0)
+          (repeat (1- (length room-pts))
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth y room-pts)) (cons 11 (nth (1+ y) room-pts))))
+            (setq y (1+ y))
+          )
+          (if (> (length room-pts) 1)
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth 0 room-pts)) (cons 11 (nth (1- (length room-pts)) room-pts))))
+          )
+          (setq i 0)
+          (repeat (sslength junction-ss)
+            (setq ent (ssname junction-ss i))
+            (setq base-pt (block-get-base-point ent))
+            (if base-pt
+              (progn
+                (setq proj-info (device-project-to-graph base-pt nil nil))
+                (if proj-info
+                  (progn
+                    (setq proj-pt (cadr proj-info))
+                    (setq proj-dist (caddr proj-info))
+                    (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 base-pt) (cons 11 proj-pt)))
+                    (setq name (block-get-name-from-text ent nil))
+                    (if (null name) (setq name "JNX"))
+                    (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
+                    (setq gjx-name-list (cons name gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq i (1+ i))
+          )
+          (setq gjx-list (reverse gjx-list))
+          (setq gjx-name-list (reverse gjx-name-list))
+          (list gjx-list gjx-name-list)
+        )
+      )
+    )
+  )
+)
+
+;;;---------------------------------------------------------------
+;;;  main-process-branch3
+;;;  Branch 3: Has room points, no junctions
+;;;  Returns: (gjx-list gjx-name-list)
+;;;---------------------------------------------------------------
+(defun main-process-branch3 (room-pts / gjx-list gjx-name-list
+                                       y tmp-pt proj-info proj-pt
+                                       temp-ss)
+  (if (null room-pts)
+    (progn
+      (princ "\n[main] Branch 3: room-pts is nil.")
+      (list nil nil)
+    )
+    (progn
+      (setq temp-ss (ssget "x" (list (cons 0 "LINE") (cons 8 *main-temp-layer*))))
+      (if (null temp-ss)
+        (progn
+          (princ "\n[main] Branch 3: No lines found (graph-build-from-lines may have failed).")
+          (list nil nil)
+        )
+        (progn
+          (princ "\n[main] Branch 3: Has room, no junctions.")
+          (setq gjx-list nil)
+          (setq gjx-name-list nil)
+          (setq y 0)
+          (repeat (length room-pts)
+            (setq tmp-pt (nth y room-pts))
+            (setq proj-info (device-project-to-graph tmp-pt nil nil))
+            (if proj-info
+              (progn
+                (setq proj-pt (cadr proj-info))
+                (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 tmp-pt) (cons 11 proj-pt)))
+                (if (= y 0)
+                  (progn
+                    (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
+                    (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
+                  )
+                )
+              )
+            )
+            (setq y (1+ y))
+          )
+          (setq y 0)
+          (repeat (1- (length room-pts))
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth y room-pts)) (cons 11 (nth (1+ y) room-pts))))
+            (setq y (1+ y))
+          )
+          (if (> (length room-pts) 1)
+            (entmakex (list (cons 0 "LINE") (cons 8 *main-temp-layer*) (cons 10 (nth 0 room-pts)) (cons 11 (nth (1- (length room-pts)) room-pts))))
+          )
+          (list gjx-list gjx-name-list)
+        )
+      )
     )
   )
 )
@@ -6030,150 +7048,29 @@
 ;;;  Branch 1: No room + has junctions
 ;;;  Branch 2: Has room + has junctions
 ;;;  Branch 3: Has room + no junctions
+;;;  NOTE: device-project-to-graph adds ephemeral graph nodes that will be
+;;;        cleared by graph-build-from-lines. The persistent artifacts are
+;;;        the projection LINE entities drawn on *main-temp-layer*.
 ;;;  Returns: (gjx_list gjx_name_list) where gjx_list = ((pt . dist) ...)
 ;;;---------------------------------------------------------------
 (defun main-process-room-points (junction-ss room-pts / gjx-list gjx-name-list
-                                       i ent base-pt proj-pt proj-dist name
+                                       i ent base-pt proj-pt proj-dist proj-info name
                                        y tmp-pt tmp-proj j)
-  (setq gjx-list nil)
-  (setq gjx-name-list nil)
-
   (cond
-    ;; Branch 1: No room points, has junctions
     ((and (null room-pts) junction-ss)
-     (princ "\n[main] Branch 1: No room, has junctions.")
-     (setq i 0)
-     (repeat (sslength junction-ss)
-       (setq ent (ssname junction-ss i))
-       (setq base-pt (block-get-base-point ent))
-       (if base-pt
-         (progn
-           (setq proj-info (device-project-to-graph base-pt nil nil))
-           (if proj-info
-             (progn
-               (setq proj-pt (cadr proj-info))
-               (setq proj-dist (caddr proj-info))
-               ;; Draw connection line on temp layer
-               (setvar "clayer" *main-temp-layer*)
-               (command-s "_.line" "_non" (trans base-pt 0 1) "_non" (trans proj-pt 0 1) "")
-               (setq name (block-get-name-from-text ent nil))
-               (if (null name) (setq name "JNX"))
-               (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
-               (setq gjx-name-list (cons name gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq i (1+ i))
-     )
-     (setq gjx-list (reverse gjx-list))
-     (setq gjx-name-list (reverse gjx-name-list))
-    )
+     (main-process-branch1 junction-ss))
 
-    ;; Branch 2: Has room points, has junctions
     ((and room-pts junction-ss)
-     (princ "\n[main] Branch 2: Has room, has junctions.")
-     ;; Connect room points to graph
-     (setq y 0)
-     (repeat (length room-pts)
-       (setq tmp-pt (nth y room-pts))
-       (setq proj-info (device-project-to-graph tmp-pt nil nil))
-       (if proj-info
-         (progn
-           (setq proj-pt (cadr proj-info))
-           (setvar "clayer" *main-temp-layer*)
-           (command-s "_.line" "_non" (trans tmp-pt 0 1) "_non" (trans proj-pt 0 1) "")
-           ;; First room point becomes a target (like junction)
-           (if (= y 0)
-             (progn
-               (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
-               (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq y (1+ y))
-     )
-     ;; Connect room points to each other (closed loop)
-     (setq y 0)
-     (repeat (1- (length room-pts))
-       (command-s "_.line" "_non" (trans (nth y room-pts) 0 1)
-                            "_non" (trans (nth (1+ y) room-pts) 0 1) "")
-       (setq y (1+ y))
-     )
-     (if (> (length room-pts) 1)
-       (command-s "_.line" "_non" (trans (nth 0 room-pts) 0 1)
-                          "_non" (trans (nth (1- (length room-pts)) room-pts) 0 1) "")
-     )
-     ;; Process junctions
-     (setq i 0)
-     (repeat (sslength junction-ss)
-       (setq ent (ssname junction-ss i))
-       (setq base-pt (block-get-base-point ent))
-       (if base-pt
-         (progn
-           (setq proj-info (device-project-to-graph base-pt nil nil))
-           (if proj-info
-             (progn
-               (setq proj-pt (cadr proj-info))
-               (setq proj-dist (caddr proj-info))
-               (setvar "clayer" *main-temp-layer*)
-               (command-s "_.line" "_non" (trans base-pt 0 1) "_non" (trans proj-pt 0 1) "")
-               (setq name (block-get-name-from-text ent nil))
-               (if (null name) (setq name "JNX"))
-               (setq gjx-list (cons (cons proj-pt proj-dist) gjx-list))
-               (setq gjx-name-list (cons name gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq i (1+ i))
-     )
-     (setq gjx-list (reverse gjx-list))
-     (setq gjx-name-list (reverse gjx-name-list))
-    )
+     (main-process-branch2 junction-ss room-pts))
 
-    ;; Branch 3: Has room points, no junctions
     ((and room-pts (null junction-ss))
-     (princ "\n[main] Branch 3: Has room, no junctions.")
-     (setq y 0)
-     (repeat (length room-pts)
-       (setq tmp-pt (nth y room-pts))
-       (setq proj-info (device-project-to-graph tmp-pt nil nil))
-       (if proj-info
-         (progn
-           (setq proj-pt (cadr proj-info))
-           (setvar "clayer" *main-temp-layer*)
-           (command-s "_.line" "_non" (trans tmp-pt 0 1) "_non" (trans proj-pt 0 1) "")
-           (if (= y 0)
-             (progn
-               (setq gjx-list (cons (cons proj-pt (distance tmp-pt proj-pt)) gjx-list))
-               (setq gjx-name-list (cons "RoomEntry" gjx-name-list))
-             )
-           )
-         )
-       )
-       (setq y (1+ y))
-     )
-     ;; Connect room points to each other (closed loop)
-     (setq y 0)
-     (repeat (1- (length room-pts))
-       (command-s "_.line" "_non" (trans (nth y room-pts) 0 1)
-                          "_non" (trans (nth (1+ y) room-pts) 0 1) "")
-       (setq y (1+ y))
-     )
-     (if (> (length room-pts) 1)
-       (command-s "_.line" "_non" (trans (nth 0 room-pts) 0 1)
-                          "_non" (trans (nth (1- (length room-pts)) room-pts) 0 1) "")
-     )
-    )
+     (main-process-branch3 room-pts))
 
     (T
      (princ "\n[main] No room points and no junctions.")
+     (list nil nil)
     )
   )
-
-  (list gjx-list gjx-name-list)
 )
 
 ;;;---------------------------------------------------------------
@@ -6186,10 +7083,7 @@
   (if ss
     (progn
       (equiv-process-all ss)
-      ;; Remove duplicates again after adding equiv lines
       (dup-remove-all nil *main-temp-layer*)
-      ;; Recompute Floyd after adding equivalent edges
-      (graph-floyd-compute)
       (princ "\n[main] Equivalent points processed.")
       T
     )
@@ -6201,42 +7095,58 @@
 ;;;  main-get-camera-blocks
 ;;;  Get camera block selection set
 ;;;---------------------------------------------------------------
-(defun main-get-camera-blocks (/ ss result)
-  (setq result (ssadd))
-  (foreach blk-name *main-camera-blocks*
-    (setq ss (block-get-all-on-layer nil blk-name))
-    (if ss
-      (progn
-        (setq i 0)
-        (repeat (sslength ss)
-          (setq result (ssadd (ssname ss i) result))
-          (setq i (1+ i))
+(defun main-get-camera-blocks (/ ss result i)
+  (if (null *main-camera-blocks*)
+    (progn
+      (princ "\n[main] Warning: *main-camera-blocks* is nil.")
+      nil
+    )
+    (progn
+      (setq result (ssadd))
+      (foreach blk-name *main-camera-blocks*
+        (setq ss (block-get-all-on-layer nil blk-name))
+        (if ss
+          (progn
+            (setq i 0)
+            (repeat (sslength ss)
+              (setq result (ssadd (ssname ss i) result))
+              (setq i (1+ i))
+            )
+          )
         )
       )
+      (if (> (sslength result) 0) result nil)
     )
   )
-  (if (> (sslength result) 0) result nil)
 )
 
 ;;;---------------------------------------------------------------
 ;;;  main-get-junction-blocks
 ;;;  Get junction block selection set
 ;;;---------------------------------------------------------------
-(defun main-get-junction-blocks (/ ss result)
-  (setq result (ssadd))
-  (foreach blk-name *main-junction-blocks*
-    (setq ss (block-get-all-on-layer nil blk-name))
-    (if ss
-      (progn
-        (setq i 0)
-        (repeat (sslength ss)
-          (setq result (ssadd (ssname ss i) result))
-          (setq i (1+ i))
+(defun main-get-junction-blocks (/ ss result i)
+  (if (null *main-junction-blocks*)
+    (progn
+      (princ "\n[main] Warning: *main-junction-blocks* is nil.")
+      nil
+    )
+    (progn
+      (setq result (ssadd))
+      (foreach blk-name *main-junction-blocks*
+        (setq ss (block-get-all-on-layer nil blk-name))
+        (if ss
+          (progn
+            (setq i 0)
+            (repeat (sslength ss)
+              (setq result (ssadd (ssname ss i) result))
+              (setq i (1+ i))
+            )
+          )
         )
       )
+      (if (> (sslength result) 0) result nil)
     )
   )
-  (if (> (sslength result) 0) result nil)
 )
 
 ;;;---------------------------------------------------------------
@@ -6246,48 +7156,48 @@
 (defun main-run-workflow (/ cameras junctions junction-ss room-result
                               gjx-list gjx-name-list connections
                               workflow-ok draw-pts i ent
-                              base-pt proj-pt proj-dist proj-info dev-name blk-name
+                              base-pt proj-pt proj-dist nearest-line nearest-ent
+                              dev-name blk-name
                               tmp-dis end-dis best-jnx best-name
-                              dev-node graph-dist tmp-jnx tmp-jnx-pt
+                              graph-dist tmp-jnx tmp-jnx-pt
                               tmp-jnx-dist tmp-jnx-name use-bias
-                              end-drawlist m_n)
+                              end-drawlist m_n main-workflow-error)
   (princ "\n\n=== CCTV System Workflow ===")
 
-  ;; Step 1: Environment setup (Berni_Start)
+  (defun main-workflow-error (msg)
+    (princ (strcat "\n[main] Error: " msg))
+    (vl-catch-all-apply 'main-cleanup nil)
+    (vl-catch-all-apply 'main-dktc nil)
+    (vl-catch-all-apply 'main-env-end nil)
+  )
+
   (main-env-start)
+  (setq *error* main-workflow-error)
   (main-init)
   (setq workflow-ok T)
 
-  ;; Step 2: Get user input for diagram insertion point
   (setq draw-pts (getpoint "\nSystem diagram insertion point: "))
   (if (null draw-pts) (setq draw-pts (list 0.0 0.0 0.0)))
 
-  ;; Step 3: Turn off non-working layers (gbtc)
   (main-gbtc)
 
-  ;; Step 4: Process cable trays (MLINE -> LINE)
   (if (null (main-process-cable-trays))
     (princ "\n[main] Warning: Cable tray processing returned nil.")
   )
 
-  ;; Step 5: Remove duplicates
   (princ "\n[main] Removing duplicates...")
   (dup-remove-all nil *main-temp-layer*)
 
-  ;; Step 6: Process room entry points (three-branch logic)
   (setq junction-ss (main-get-junction-blocks))
   (setq room-result (main-process-room-points junction-ss *main-room-points*))
   (setq gjx-list (car room-result))
   (setq gjx-name-list (cadr room-result))
 
-  ;; Step 7: Process equivalent points
   (main-process-equivalent-points)
 
-  ;; Step 8: Break all intersections
   (princ "\n[main] Breaking intersections...")
   (break-lines-all (list *main-temp-layer* *main-temp-layer2*))
 
-  ;; Step 9: Build graph
   (if (null (main-build-graph))
     (progn
       (princ "\n[main] Workflow aborted: graph build failed.")
@@ -6295,140 +7205,132 @@
     )
   )
 
-  ;; Step 10-12: Process cameras
   (if workflow-ok
     (progn
-      ;; Turn off cable tray layer during calculation
       (if *main-cable-tray-layer*
         (command-s "_.layer" "_off" *main-cable-tray-layer* "")
       )
 
-      (setq cameras (main-get-camera-blocks))
-      (if (null cameras)
+      (if (null *main-camera-blocks*)
         (progn
-          (princ "\n[main] Error: No cameras found.")
+          (princ "\n[main] Error: *main-camera-blocks* is nil, no cameras configured.")
           (setq workflow-ok nil)
         )
       )
 
       (if workflow-ok
         (progn
-          (princ (strcat "\n[main] Processing " (itoa (sslength cameras)) " cameras..."))
-          (setq end-drawlist nil)
-          (setq i 0)
+          (setq cameras (main-get-camera-blocks))
+          (if (null cameras)
+            (progn
+              (princ "\n[main] Error: No cameras found.")
+              (setq workflow-ok nil)
+            )
+          )
 
-          (repeat (sslength cameras)
-            (setq ent (ssname cameras i))
-            (setq base-pt (block-get-base-point ent))
-            (if base-pt
-              (progn
-                ;; Get camera block name and camera name from nearby text
-                (setq blk-name (cdr (assoc 2 (entget ent))))
-                (setq dev-name (block-get-name-from-text ent nil))
-                (if (null dev-name) (setq dev-name "CAM"))
+          (if workflow-ok
+            (progn
+              (princ (strcat "\n[main] Processing " (itoa (sslength cameras)) " cameras..."))
+              (setq end-drawlist nil)
+              (setq i 0)
 
-                ;; Project camera to graph
-                (setq proj-info (device-project-to-graph base-pt nil nil))
-                (if proj-info
+              (repeat (sslength cameras)
+                (setq ent (ssname cameras i))
+                (setq base-pt (block-get-base-point ent))
+                (if base-pt
                   (progn
-                    (setq proj-pt (cadr proj-info))
-                    (setq proj-dist (caddr proj-info))
+                    (setq blk-name (cdr (assoc 2 (entget ent))))
+                    (setq dev-name (block-get-name-from-text ent nil))
+                    (if (null dev-name) (setq dev-name "CAM"))
 
-                    ;; Find best junction
-                    ;; Original checks closest 3 by straight-line distance,
-                    ;; but checking all is more accurate (improvement)
-                    (setq end-dis 1000000.0)
-                    (setq best-jnx nil)
-                    (setq best-name nil)
+                    (setq nearest-line (device-find-nearest-line base-pt nil nil))
+                    (if nearest-line
+                      (progn
+                        (setq proj-pt (cadr nearest-line))
+                        (setq proj-dist (caddr nearest-line))
+                        (setq nearest-ent (car nearest-line))
 
-                    (setq m_n 0)
-                    (repeat (length gjx-list)
-                      (setq tmp-jnx (nth m_n gjx-list))
-                      (setq tmp-jnx-pt (car tmp-jnx))
-                      (setq tmp-jnx-dist (cdr tmp-jnx))
-                      (setq tmp-jnx-name (nth m_n gjx-name-list))
+                        (setq end-dis 1000000.0)
+                        (setq best-jnx nil)
+                        (setq best-name nil)
 
-                      ;; Calculate shortest path distance
-                      (setq dev-node (car proj-info))
-                      (setq jnx-node (graph-get-node-index tmp-jnx-pt))
-                      (if jnx-node
-                        (progn
-                          (setq graph-dist (graph-get-distance dev-node jnx-node))
-                          (if (and graph-dist (< graph-dist 1e29))
+                        (setq m_n 0)
+                        (repeat (length gjx-list)
+                          (setq tmp-jnx (nth m_n gjx-list))
+                          (setq tmp-jnx-pt (car tmp-jnx))
+                          (setq tmp-jnx-dist (cdr tmp-jnx))
+                          (setq tmp-jnx-name (nth m_n gjx-name-list))
+
+                          (setq jnx-node (graph-get-node-index tmp-jnx-pt))
+                          (if jnx-node
                             (progn
-                              ;; Distance formula: (graph_dist + dev_proj + jnx_proj) * coef + bias
-                              ;; Original uses different bias for room entry vs junction:
-                              ;;   room entry (jifang_ptt): jf_bias (default 25000)
-                              ;;   junction box: gjx_bias (default 10000)
-                              (setq use-bias
-                                (if (= tmp-jnx-name "RoomEntry")
-                                  *main-room-bias*
-                                  *main-junction-bias*))
-                              (setq tmp-dis (+ (* (+ graph-dist proj-dist tmp-jnx-dist)
-                                                   *main-cable-coefficient*)
-                                             use-bias))
-                              (if (< tmp-dis end-dis)
+                              (setq graph-dist (graph-distance-via-edge proj-pt proj-dist nearest-ent jnx-node))
+                              (if graph-dist
                                 (progn
-                                  (setq end-dis tmp-dis)
-                                  (setq best-jnx tmp-jnx)
-                                  (setq best-name tmp-jnx-name)
+                                  (setq use-bias
+                                    (if (= tmp-jnx-name "RoomEntry")
+                                      *main-room-bias*
+                                      *main-junction-bias*))
+                                  (setq tmp-dis (+ (* (+ graph-dist tmp-jnx-dist)
+                                                       *main-cable-coefficient*)
+                                             use-bias))
+                                  (if (< tmp-dis end-dis)
+                                    (progn
+                                      (setq end-dis tmp-dis)
+                                      (setq best-jnx tmp-jnx)
+                                      (setq best-name tmp-jnx-name)
+                                    )
+                                  )
                                 )
                               )
                             )
                           )
+                          (setq m_n (1+ m_n))
+                        )
+
+                        (if best-jnx
+                          (progn
+                            (setq end-drawlist
+                              (append end-drawlist
+                                      (list (list end-dis blk-name dev-name best-name))))
+                            (princ (strcat "\n  CAM: " dev-name " -> " best-name
+                                           " dist=" (rtos end-dis 2 0)))
+                          )
+                          (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
                         )
                       )
-                      (setq m_n (1+ m_n))
-                    )
-
-                    (if best-jnx
-                      (progn
-                        ;; Add to result: (distance block-name camera-name junction-name)
-                        (setq end-drawlist
-                          (append end-drawlist
-                                  (list (list end-dis blk-name dev-name best-name))))
-                        (princ (strcat "\n  CAM: " dev-name " -> " best-name
-                                       " dist=" (rtos end-dis 2 0)))
-                      )
-                      (princ (strcat "\n  CAM: " dev-name " -> NO JUNCTION FOUND"))
+                      (princ (strcat "\n  CAM: " dev-name " -> projection failed"))
                     )
                   )
-                  (princ (strcat "\n  CAM: " dev-name " -> projection failed"))
                 )
+                (setq i (1+ i))
+              )
+
+              (if *main-cable-tray-layer*
+                (command-s "_.layer" "_on" *main-cable-tray-layer* "")
+              )
+
+              (main-dktc)
+
+              (setq end-drawlist (sysdiag-classify-by-junction end-drawlist))
+
+              (if end-drawlist
+                (progn
+                  (princ (strcat "\n[main] Drawing system diagram with "
+                                 (itoa (length end-drawlist)) " groups..."))
+                  (sysdiag-draw-classified draw-pts end-drawlist)
+                )
+                (princ "\n[main] Warning: No results to draw.")
               )
             )
-            (setq i (1+ i))
-          )
-
-          ;; Turn cable tray layer back on
-          (if *main-cable-tray-layer*
-            (command-s "_.layer" "_on" *main-cable-tray-layer* "")
-          )
-
-          ;; Step 13: Restore layers (dktc)
-          (main-dktc)
-
-          ;; Step 14: Classify results by junction
-          (setq end-drawlist (sysdiag-classify-by-junction end-drawlist))
-
-          ;; Step 15: Draw system diagram
-          (if end-drawlist
-            (progn
-              (princ (strcat "\n[main] Drawing system diagram with "
-                             (itoa (length end-drawlist)) " groups..."))
-              (sysdiag-draw-classified draw-pts end-drawlist)
-            )
-            (princ "\n[main] Warning: No results to draw.")
           )
         )
       )
     )
   )
 
-  ;; Step 16: Cleanup
   (main-cleanup)
 
-  ;; Step 17: Restore environment (Berni_End)
   (main-env-end)
 
   (if workflow-ok
@@ -6479,7 +7381,6 @@
       (setq val (param-get params "room_bias"))
       (if val (setq *main-room-bias* (atof (car val))))
 
-      ;; Restore bltc
       (setq val (param-get params "bltc_layers"))
       (if val (setq *main-bltc* val))
 
@@ -6513,17 +7414,12 @@
 (princ)
 
 ;;;===============================================================
-;;;  --- MODULE SEPARATOR ---
-;;;  Previous: M12_main.lsp
-;;;  Next: M13_test_suite.lsp
-;;;===============================================================
-
 ;;;===============================================================
 ;;;  M13 - Test Suite Module
 ;;;  Comprehensive test suite for all modules
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01-M12
+;;;  DEPENDENCIES: M00-M12
 ;;;===============================================================
 
 ;;;---------------------------------------------------------------
@@ -6587,6 +7483,7 @@
   (princ (strcat "\n\n=== Testing " module-name " ==="))
   (setq result
     (cond
+      ((= module-name "M00") (test-M00-spatial-index))
       ((= module-name "M01") (test-M01-graph-algorithm))
       ((= module-name "M02") (test-M02-line-utils))
       ((= module-name "M03") (test-M03-mline-converter))
@@ -6622,6 +7519,7 @@
   (princ "\n========================================")
   
   ;; Run all module tests
+  (test-module "M00")
   (test-module "M01")
   (test-module "M02")
   (test-module "M03")
@@ -6678,3 +7576,12 @@
 (princ "\n  Functions: test-all, test-module, test-report")
 (princ "\n  Usage: (test-all) or command: CCTV-Test")
 (princ)
+
+;;;===============================================================
+;;;  All modules loaded
+;;;===============================================================
+(princ "\n\n=== CCTV System Loaded ===")
+(princ "\nCommands: CCTV-Config, CCTV-Run, drawCCTV, CCTV-Save, CCTV-Load")
+(princ "\n          CCTV-RoomPts, CCTV-MLINEArea, CCTV-EquivAdd, CCTV-EquivClear")
+(princ "\n          CCTV-LayerProtect, CCTV-ShowConfig, CCTV-Help, CCTV-Test")
+(princ "\n")
