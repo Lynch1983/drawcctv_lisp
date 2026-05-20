@@ -6424,18 +6424,129 @@
 
 ;;;===============================================================
 ;;;===============================================================
-;;;  M11 - GUI Handlers Module (Simplified)
-;;;  Command-line based user interaction
-;;;  Note: Original used OpenDCL, this is a simplified version
-;;;  Updated to support all M12 functions
+;;;  M11 - GUI Handlers Module (OpenDCL)
+;;;  OpenDCL-based form with button handlers from original drawCCTV
+;;;  Adapted to use M12 module functions
 ;;;===============================================================
 ;;;  ENCODING: ANSI (ASCII only, no Chinese characters)
-;;;  DEPENDENCIES: M01-M12
+;;;  DEPENDENCIES: M01-M12, OpenDCL runtime
 ;;;===============================================================
+
+;;;---------------------------------------------------------------
+;;;  OpenDCL form initialization
+;;;  Load OpenDCL runtime and import embedded form from base64
+;;;---------------------------------------------------------------
+(vl-load-com)
+
+;;---------------------------------------------------------------
+;;  OpenDCL Initialization (protected against missing/broken ARX)
+;;  Loads OpenDCL.arx if available, then imports the form.
+;;  If anything fails, falls back to CLI-only mode.
+;;---------------------------------------------------------------
+(setq *open-dcl-ok* nil)
+;; Try loading OpenDCL. Two scenarios:
+;; 1. Not loaded yet -> arxload returns module name on success
+;; 2. Already loaded by AutoCAD startup -> arxload errors, we check (arx) list
+(vl-catch-all-apply
+  '(lambda (/ )
+    (if (arxload "OpenDCL.arx" nil)
+      (setq *open-dcl-ok* T)
+    )
+  )
+)
+;; If arxload above failed (e.g., already loaded), check loaded modules
+(if (not *open-dcl-ok*)
+  (foreach mod (arx)
+    (if (wcmatch (strcase mod) "*OPENDCL*")
+      (setq *open-dcl-ok* T)
+    )
+  )
+)
+(if (not *open-dcl-ok*)
+  (princ "\n*** OpenDCL runtime not available. Use CLI commands: CCTV-Config, CCTV-Run")
+)
+
+(setq dclfile '("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"
+"TBgmmp7ui32Bh0H3tzLm"))
+(if *open-dcl-ok*
+  (vl-catch-all-apply 'dcl_project_import (list dclfile))
+  (princ "\n*** OpenDCL form not loaded. Use CLI commands: CCTV-Config, CCTV-Run")
+)
+
+;;;---------------------------------------------------------------
+;;;  Global state variables (mirrored from original)
+;;;---------------------------------------------------------------
+(setq allstr nil)
+(setq choose_str nil)
+(setq choose_str1 nil)
+(setq choose_str2 nil)
+(setq choose_str5 nil)
+(setq choose_str9 nil)
 
 ;;;---------------------------------------------------------------
 ;;;  gui-select-blocks
 ;;;  Interactive block selection
+;;;  Returns: list of block names or nil
 ;;;---------------------------------------------------------------
 (defun gui-select-blocks (prompt / ss names i name)
   (princ (strcat "\n" prompt))
@@ -6468,16 +6579,6 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  gui-select-point
-;;;  Interactive point selection
-;;;---------------------------------------------------------------
-(defun gui-select-point (prompt / pt)
-  (princ (strcat "\n" prompt))
-  (setq pt (getpoint))
-  pt
-)
-
-;;;---------------------------------------------------------------
 ;;;  gui-select-layers-multi
 ;;;  Select multiple layers interactively
 ;;;  Returns: list of layer names
@@ -6499,7 +6600,7 @@
 
 ;;;---------------------------------------------------------------
 ;;;  gui-configure-workflow
-;;;  Interactive workflow configuration
+;;;  Interactive workflow configuration (fallback when no OpenDCL)
 ;;;  Matches original OpenDCL form fields
 ;;;---------------------------------------------------------------
 (defun gui-configure-workflow (/ cam-blocks jnx-blocks tray-layer pipe-layer
@@ -6607,274 +6708,669 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  c:CCTV-Config
-;;;  Configuration command
+;;;  c:drawCCTV - Show the configuration form
 ;;;---------------------------------------------------------------
-(defun c:CCTV-Config ()
-  (gui-configure-workflow)
+(defun c:drawCCTV ()
+  (if *open-dcl-ok*
+    (dcl_form_show drawCCTV_form1)
+    (gui-configure-workflow)
+  )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-Run
-;;;  Run workflow with current config
-;;;---------------------------------------------------------------
-(defun c:CCTV-Run ()
-  (if (null *main-camera-blocks*)
-    (progn
-      (princ "\nError: No camera blocks configured.")
-      (princ "\nRun CCTV-Config first.")
-      (gui-configure-workflow)
+(defun c:CCTV-Config ()
+  (if *open-dcl-ok*
+    (dcl_form_show drawCCTV_form1)
+    (gui-configure-workflow)
+  )
+  (princ)
+)
+
+;;;--- Form close --------------------------------------------------
+(defun c:drawCCTV/Form1/TextButton41#OnClicked (/)
+  (Dcl_Form_Close drawCCTV_form1)
+)
+
+(defun c:drawCCTV/Form1/TextButton22#OnClicked (/)
+  (Dcl_Form_Close drawCCTV_form1)
+)
+
+;;;===============================================================
+;;;  Helper utilities
+;;;===============================================================
+
+(defun split-string (str / start end index substring lst)
+  (setq lst '())
+  (setq start 1)
+  (setq end (strlen str))
+  (while (< start end)
+    (setq index (vl-string-position (ascii ",") str start nil))
+    (if (null index)
+      (progn (setq substring (substr str start)) (setq start end))
+      (progn
+        (setq substring (substr str start (1+ (- index start))))
+        (setq start (+ index 1))
+      )
+    )
+    (setq substring (vl-string-subst "" "," substring))
+    (setq lst (cons substring lst))
+  )
+  lst
+)
+
+(defun hc-string (str / tmplst s)
+  (setq tmplst str)
+  (setq s (car tmplst) tmplst (cdr tmplst))
+  (while tmplst
+    (setq s (strcat s "," (car tmplst)))
+    (setq tmplst (cdr tmplst))
+  )
+  s
+)
+
+(defun clean_creen (/ clean_set i tmp)
+  (setq i 0)
+  (if (or (tblsearch "Layer" "test1")
+          (tblsearch "Layer" "cc_xc11")
+          (tblsearch "Layer" "test2"))
+    (setq clean_set (ssget "x" (list (cons 8 "test1,cc_xc11,test2"))))
+  )
+  (if clean_set
+    (repeat (sslength clean_set)
+      (setq tmp (ssname clean_set i))
+      (command-s "erase" tmp "")
+      (setq i (1+ i))
     )
   )
-  (if *main-camera-blocks*
+)
+
+;;;===============================================================
+;;;  Button handlers - adapted from original drawCCTV(界面版)2.lsp
+;;;===============================================================
+
+;;;--- TextButton16: Select camera blocks -------------------------
+;; Hide form → ssget (inline) → show form — matches TextButton5/15 pattern
+(defun c:drawCCTV/Form1/TextButton16#OnClicked (/ ss tmplst list-str tklist tmp)
+  (dcl-Form-Hide drawCCTV_form1)
+  (setq ss (ssget '((0 . "INSERT"))) tmplst () list-str nil tklist ())
+  (if ss
+    (progn
+      (repeat (sslength ss)
+        (setq tmp (cdr (assoc 2 (entget (ssname ss 0)))))
+        (if (not (member tmp tmplst)) (setq tmplst (cons tmp tmplst)))
+        (ssdel (ssname ss 0) ss)
+      )
+      (setq list-str (car tmplst) tmplst (cdr tmplst))
+      (while tmplst
+        (setq list-str (strcat list-str "," (car tmplst)))
+        (setq tmplst (cdr tmplst))
+      )
+      (setq tklist (split-string list-str))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox3))
+      (if allstr
+        (foreach x tklist
+          (if (not (member x allstr)) (setq allstr (cons x allstr)))
+        )
+        (setq allstr tklist)
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox3 allstr)
+    )
+  )
+  (dcl-Form-show drawCCTV_form1)
+  (princ)
+)
+
+;; AutoLISP 命令，由 dcl-SendString 触发，在 AutoCAD 上下文中执行 ssget
+(defun c:cctv-sel-camera (/ ss tmplst list-str tklist tmp)
+  (setq ss (ssget '((0 . "INSERT"))) tmplst () list-str nil tklist ())
+  (if ss
+    (progn
+      (repeat (sslength ss)
+        (setq tmp (cdr (assoc 2 (entget (ssname ss 0)))))
+        (if (not (member tmp tmplst)) (setq tmplst (cons tmp tmplst)))
+        (ssdel (ssname ss 0) ss)
+      )
+      (setq list-str (car tmplst) tmplst (cdr tmplst))
+      (while tmplst
+        (setq list-str (strcat list-str "," (car tmplst)))
+        (setq tmplst (cdr tmplst))
+      )
+      (setq tklist (split-string list-str))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox3))
+      (if allstr
+        (foreach x tklist
+          (if (not (member x allstr)) (setq allstr (cons x allstr)))
+        )
+        (setq allstr tklist)
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox3 allstr)
+    )
+  )
+  (princ)
+)
+
+(defun c:drawCCTV/Form1/ListBox3#OnDblClicked (/)
+  (setq choose_str (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox3)))
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox3))
+)
+
+(defun c:drawCCTV/Form1/TextButton17#OnClicked (/)
+  (setq allstr (vl-remove choose_str allstr))
+  (dcl-Control-SetList drawCCTV/Form1/ListBox3 allstr)
+)
+
+;;;--- TextButton2: Select camera name text layers ----------------
+(defun c:drawCCTV/Form1/TextButton2#OnClicked (/ ss tmplst list-str)
+  (setq ss (ssget '((0 . "TEXT"))) tmplst () list-str nil)
+  (if ss
+    (progn
+      (repeat (sslength ss)
+        (setq tmp (cdr (assoc 8 (entget (ssname ss 0)))))
+        (if (not (member tmp tmplst)) (setq tmplst (cons tmp tmplst)))
+        (ssdel (ssname ss 0) ss)
+      )
+      (setq list-str (car tmplst) tmplst (cdr tmplst))
+      (while tmplst
+        (setq list-str (strcat list-str "," (car tmplst)))
+        (setq tmplst (cdr tmplst))
+      )
+    )
+  )
+  (setq list-str (split-string list-str))
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox1))
+  (if allstr
+    (foreach x list-str
+      (if (not (member x allstr)) (setq allstr (cons x allstr)))
+    )
+    (setq allstr list-str)
+  )
+  (dcl-Control-SetList drawCCTV/Form1/ListBox1 allstr)
+)
+
+(defun c:drawCCTV/Form1/TextButton24#OnClicked (/)
+  (c:drawCCTV/Form1/TextButton2#OnClicked)
+)
+
+(defun c:drawCCTV/Form1/TextButton1#OnClicked (/)
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox1))
+  (setq choose_str1 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox1)))
+  (setq allstr (vl-remove choose_str1 allstr))
+  (dcl-Control-SetList drawCCTV/Form1/ListBox1 allstr)
+)
+
+(defun c:drawCCTV/Form1/ListBox1#OnDblClicked (/)
+  (setq choose_str1 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox1)))
+)
+
+;;;--- TextButton9: Select junction blocks -------------------------
+;; Hide form → ssget (inline) → show form — matches TextButton5/15 pattern
+(defun c:drawCCTV/Form1/TextButton9#OnClicked (/ ss tmplst list-str tklist tmp)
+  (dcl-Form-Hide drawCCTV_form1)
+  (setq ss (ssget '((0 . "INSERT"))) tmplst () list-str nil tklist ())
+  (if ss
+    (progn
+      (repeat (sslength ss)
+        (setq tmp (cdr (assoc 2 (entget (ssname ss 0)))))
+        (if (not (member tmp tmplst)) (setq tmplst (cons tmp tmplst)))
+        (ssdel (ssname ss 0) ss)
+      )
+      (setq list-str (car tmplst) tmplst (cdr tmplst))
+      (while tmplst
+        (setq list-str (strcat list-str "," (car tmplst)))
+        (setq tmplst (cdr tmplst))
+      )
+      (setq tklist (split-string list-str))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox5))
+      (if allstr
+        (foreach x tklist
+          (if (not (member x allstr)) (setq allstr (cons x allstr)))
+        )
+        (setq allstr tklist)
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox5 allstr)
+    )
+  )
+  (dcl-Form-show drawCCTV_form1)
+  (princ)
+)
+
+;; AutoLISP 命令，由 dcl-SendString 触发，在 AutoCAD 上下文中执行 ssget
+(defun c:cctv-sel-junction (/ ss tmplst list-str tklist tmp)
+  (setq ss (ssget '((0 . "INSERT"))) tmplst () list-str nil tklist ())
+  (if ss
+    (progn
+      (repeat (sslength ss)
+        (setq tmp (cdr (assoc 2 (entget (ssname ss 0)))))
+        (if (not (member tmp tmplst)) (setq tmplst (cons tmp tmplst)))
+        (ssdel (ssname ss 0) ss)
+      )
+      (setq list-str (car tmplst) tmplst (cdr tmplst))
+      (while tmplst
+        (setq list-str (strcat list-str "," (car tmplst)))
+        (setq tmplst (cdr tmplst))
+      )
+      (setq tklist (split-string list-str))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox5))
+      (if allstr
+        (foreach x tklist
+          (if (not (member x allstr)) (setq allstr (cons x allstr)))
+        )
+        (setq allstr tklist)
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox5 allstr)
+    )
+  )
+  (princ)
+)
+
+(defun c:drawCCTV/Form1/TextButton25#OnClicked (/)
+  (c:drawCCTV/Form1/TextButton9#OnClicked)
+)
+
+(defun c:drawCCTV/Form1/TextButton10#OnClicked (/)
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox5))
+  (setq choose_str5 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox5)))
+  (setq allstr (vl-remove choose_str5 allstr))
+  (dcl-Control-SetList drawCCTV/Form1/ListBox5 allstr)
+)
+
+(defun c:drawCCTV/Form1/ListBox5#OnDblClicked (/)
+  (setq choose_str5 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox5)))
+)
+
+;;;--- TextButton3: Select cable tray MLINE layer -----------------
+(defun c:drawCCTV/Form1/TextButton3#OnClicked (/ ent layer)
+  (setq ent (entsel "\nSelect MLINE on cable tray layer: "))
+  (if ent
+    (progn
+      (setq layer (cdr (assoc 8 (entget (car ent)))))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox2))
+      (if (not (member layer allstr))
+        (setq allstr (cons layer allstr))
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox2 allstr)
+    )
+  )
+)
+
+(defun c:drawCCTV/Form1/TextButton4#OnClicked (/)
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox2))
+  (setq choose_str2 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox2)))
+  (setq allstr (vl-remove choose_str2 allstr))
+  (dcl-Control-SetList drawCCTV/Form1/ListBox2 allstr)
+)
+
+(defun c:drawCCTV/Form1/ListBox2#OnDblClicked (/)
+  (setq choose_str2 (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox2)))
+)
+
+;;;--- TextButton14: Select MLINE area ----------------------------
+(defun c:drawCCTV/Form1/TextButton14#OnClicked (/ p1 p2)
+  (setq p1 (getpoint "\nFirst corner of cable tray area: "))
+  (if p1
+    (progn
+      (setq p2 (getcorner p1 "\nOther corner: "))
+      (if p2
+        (progn
+          (setq mline_set (ssget "_c" p1 p2 '((0 . "MLINE"))))
+          (if mline_set
+            (princ (strcat "\nSelected " (itoa (sslength mline_set)) " MLINE(s)."))
+            (princ "\nNo MLINEs found.")
+          )
+        )
+      )
+    )
+  )
+)
+
+;;;--- TextButton18: Select pipe layer ----------------------------
+(defun c:drawCCTV/Form1/TextButton18#OnClicked (/ ent layer)
+  (setq ent (entsel "\nSelect MLINE on pipe layer: "))
+  (if ent
+    (progn
+      (setq layer (cdr (assoc 8 (entget (car ent)))))
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox6))
+      (if (not (member layer allstr))
+        (setq allstr (cons layer allstr))
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox6 allstr)
+    )
+  )
+)
+
+(defun c:drawCCTV/Form1/TextButton8#OnClicked (/)
+  (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox6))
+  (dcl-Control-SetList drawCCTV/Form1/ListBox6 (cdr allstr))
+)
+
+;;;--- TextButton5: Box-select junction block from list ------------
+(defun c:drawCCTV/Form1/TextButton5#OnClicked (/ gk_tmplst gjx_ksh)
+  (setq gk_tmplst (dcl-Control-GetList drawCCTV/Form1/ListBox5))
+  (setq gjx_ksh (car gk_tmplst) gk_tmplst (cdr gk_tmplst))
+  (while gk_tmplst
+    (setq gjx_ksh (strcat gjx_ksh "," (car gk_tmplst)))
+    (setq gk_tmplst (cdr gk_tmplst))
+  )
+  (if gjx_ksh
+    (progn
+      (dcl-Form-Hide drawCCTV_form1)
+      (setq gjx_set (ssget (list (cons 2 gjx_ksh))))
+      (dcl-Form-show drawCCTV_form1)
+    )
+    (alert "请先选择汇聚箱图块")
+  )
+)
+
+;;;--- TextButton7: Add room entry points -------------------------
+(defun c:drawCCTV/Form1/TextButton7#OnClicked (/ pt pts result)
+  (setq pts nil)
+  (while (setq result (vl-catch-all-apply 'getpoint '("\nRoom entry point (Enter to finish): ")))
+    (setq pt result)
+    (setq pts (cons (list (car pt) (cadr pt)) pts))
+    (princ (strcat "\n  Point: " (rtos (car pt) 2 0) "," (rtos (cadr pt) 2 0)))
+  )
+  (if pts
+    (progn
+      (setq pts (reverse pts))
+      (setq *main-room-points* pts)
+      (setq allstr nil)
+      (foreach p pts
+        (setq allstr (cons (strcat (rtos (car p) 2 0) "," (rtos (cadr p) 2 0)) allstr))
+      )
+      (dcl-Control-SetList drawCCTV/Form1/ListBox11 allstr)
+      (princ (strcat "\nTotal: " (itoa (length pts)) " point(s)."))
+    )
+    (princ "\nNo points set.")
+  )
+)
+
+;;;--- TextButton26: Remove room point ----------------------------
+(defun c:drawCCTV/Form1/TextButton26#OnClicked (/ sel)
+  (setq sel (car (dcl-ListBox-GetSelectedItems drawCCTV/Form1/ListBox9)))
+  (if sel
+    (progn
+      (setq allstr (dcl-Control-GetList drawCCTV/Form1/ListBox9))
+      (setq allstr (vl-remove sel allstr))
+      (dcl-Control-SetList drawCCTV/Form1/ListBox9 allstr)
+    )
+  )
+)
+
+;;;--- TextButton13: Set coefficient -------------------------------
+(defun c:drawCCTV/Form1/TextButton13#OnClicked (/ coef)
+  (setq coef (atof (dcl-Control-GetText drawCCTV/Form1/TextBox1)))
+  (if (<= coef 0) (setq coef 1.2))
+  (setq *main-cable-coefficient* coef)
+  (princ (strcat "\nCoefficient set to: " (rtos coef 2 2)))
+)
+
+;;;--- TextButton6: Set biases -------------------------------------
+(defun c:drawCCTV/Form1/TextButton6#OnClicked (/ tmp)
+  (setq tmp (* (atof (dcl-Control-GetText drawCCTV/Form1/TextBox2)) 1000))
+  (if (> tmp 0) (setq *main-junction-bias* tmp))
+  (setq tmp (* (atof (dcl-Control-GetText drawCCTV/Form1/TextBox3)) 1000))
+  (if (> tmp 0) (setq *main-room-bias* tmp))
+  (princ (strcat "\nBiases set. J=" (rtos *main-junction-bias* 2 0)
+                 " R=" (rtos *main-room-bias* 2 0)))
+)
+
+;;;--- TextButton19/20: Load parameter file -----------------------
+(defun c:drawCCTV/Form1/TextButton19#OnClicked (/ fn)
+  (setq fn (getfiled "Select parameter file" "" "txt" 0))
+  (if fn
+    (progn
+      (main-load-parameters fn)
+      (princ "\nParameter file loaded.")
+    )
+  )
+)
+
+(defun c:drawCCTV/Form1/TextButton20#OnClicked (/)
+  (c:drawCCTV/Form1/TextButton19#OnClicked)
+)
+
+;;;--- TextButton15: Box-select camera blocks by list content ------
+(defun c:drawCCTV/Form1/TextButton15#OnClicked (/ cctv_name_tmplst cctv_list cctv_set)
+  (setq cctv_name_tmplst (dcl-Control-GetList drawCCTV/Form1/ListBox3))
+  (if cctv_name_tmplst
+    (progn
+      (setq cctv_list (car cctv_name_tmplst) cctv_name_tmplst (cdr cctv_name_tmplst))
+      (while cctv_name_tmplst
+        (setq cctv_list (strcat cctv_list "," (car cctv_name_tmplst)))
+        (setq cctv_name_tmplst (cdr cctv_name_tmplst))
+      )
+      (if cctv_list
+        (progn
+          (dcl-Form-Hide drawCCTV_form1)
+          (setq cctv_set (ssget (list (cons 2 cctv_list))))
+          (dcl-Form-show drawCCTV_form1)
+        )
+        (alert "未确定摄像机图块")
+      )
+    )
+    (alert "未确定摄像机图块")
+  )
+)
+
+;;;--- TextButton12: RUN WORKFLOW ----------------------------------
+(defun c:drawCCTV/Form1/TextButton12#OnClicked (/ coef jb rb
+                                                    cam-blks name-layers jnx-blks
+                                                    tray-layer pipe-layer)
+  ;; Collect all settings from form controls
+  (setq coef (atof (dcl-Control-GetText drawCCTV/Form1/TextBox1)))
+  (if (<= coef 0) (setq coef 1.2))
+  (setq *main-cable-coefficient* coef)
+
+  (setq jb (* (atof (dcl-Control-GetText drawCCTV/Form1/TextBox2)) 1000))
+  (setq *main-junction-bias* (if (> jb 0) jb 10000.0))
+  (setq rb (* (atof (dcl-Control-GetText drawCCTV/Form1/TextBox3)) 1000))
+  (setq *main-room-bias* (if (> rb 0) rb 25000.0))
+
+  ;; Camera blocks from ListBox3
+  (setq cam-blks (dcl-Control-GetList drawCCTV/Form1/ListBox3))
+  (if cam-blks (setq *main-camera-blocks* cam-blks))
+
+  ;; Name layers from ListBox1
+  (setq name-layers (dcl-Control-GetList drawCCTV/Form1/ListBox1))
+  (if name-layers (setq *main-camera-name-layers* name-layers))
+
+  ;; Junction blocks from ListBox5
+  (setq jnx-blks (dcl-Control-GetList drawCCTV/Form1/ListBox5))
+  (if jnx-blks (setq *main-junction-blocks* jnx-blks))
+
+  ;; Cable tray layer from ListBox2 (first item)
+  (setq tray-layer (car (dcl-Control-GetList drawCCTV/Form1/ListBox2)))
+  (if tray-layer
+    (progn
+      (setq *main-cable-tray-layer* tray-layer)
+      (main-bltc-add tray-layer)
+    )
+  )
+
+  ;; Pipe layer from ListBox6 (first item)
+  (setq pipe-layer (car (dcl-Control-GetList drawCCTV/Form1/ListBox6)))
+  (if pipe-layer (setq *main-pipe-layer* pipe-layer))
+
+  ;; Close form and run
+  (dcl_form_close drawCCTV_form1)
+  (main-run-workflow)
+  (princ)
+)
+
+;;;--- TextButton23: Clean temporary entities ---------------------
+(defun c:drawCCTV/Form1/TextButton23#OnClicked (/)
+  (clean_creen)
+  (main-cleanup)
+  (princ "\nTemporary entities cleaned.")
+)
+
+;;;--- TextButton21: Show configuration in text window ------------
+(defun c:drawCCTV/Form1/TextButton21#OnClicked (/)
+  (c:CCTV-ShowConfig)
+)
+
+;;;--- TextButton42: Cable quantity label -------------------------
+(defun c:drawCCTV/Form1/TextButton42#OnClicked (/ test_sets total n text
+                                                    textstr drawpts)
+  (setq test_sets (ssget '((0 . "*text"))))
+  (setq n 0 total 0)
+  (if test_sets
+    (repeat (sslength test_sets)
+      (setq text (cdr (assoc 1 (entget (ssname test_sets n)))))
+      (if (vl-string-search "CAM-" text)
+        (setq total (+ (atoi text) total))
+      )
+      (setq n (1+ n))
+    )
+  )
+  (setq drawpts (getpoint "\nInsertion point for quantity label: "))
+  (if drawpts
+    (progn
+      (setq textstr (strcat "CAM-" (itoa total)))
+      (command-s "text" drawpts 250 0 textstr)
+    )
+  )
+)
+
+;;;===============================================================
+;;;  Command-line versions (no form required)
+;;;===============================================================
+
+(defun c:CCTV-Run (/)
+  (if (null *main-camera-blocks*)
+    (progn
+      (princ "\nNo camera blocks configured. Run CCTV-Config first.")
+      (if *open-dcl-ok*
+        (dcl_form_show drawCCTV_form1)
+        (gui-configure-workflow)
+      )
+    )
     (main-run-workflow)
   )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-Save
-;;;  Save configuration to file
-;;;---------------------------------------------------------------
-(defun c:CCTV-Save (/ filename)
-  (setq filename (getfiled "Save Configuration" "" "txt" 1))
-  (if filename
-    (progn
-      (main-save-parameters filename)
-      (princ (strcat "\nConfiguration saved to: " filename))
-    )
-    (princ "\nSave cancelled.")
-  )
+(defun c:CCTV-Save (/ fn)
+  (setq fn (getfiled "Save Configuration" "" "txt" 1))
+  (if fn (progn (main-save-parameters fn) (princ (strcat "\nSaved: " fn))))
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-Load
-;;;  Load configuration from file
-;;;---------------------------------------------------------------
-(defun c:CCTV-Load (/ filename)
-  (setq filename (getfiled "Load Configuration" "" "txt" 0))
-  (if filename
-    (progn
-      (main-load-parameters filename)
-      (princ (strcat "\nConfiguration loaded from: " filename))
-    )
-    (princ "\nLoad cancelled.")
-  )
+(defun c:CCTV-Load (/ fn)
+  (setq fn (getfiled "Load Configuration" "" "txt" 0))
+  (if fn (progn (main-load-parameters fn) (princ (strcat "\nLoaded: " fn))))
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-RoomPts
-;;;  Set room entry points interactively
-;;;  Equivalent to original room point selection
-;;;---------------------------------------------------------------
-(defun c:CCTV-RoomPts (/ pt pts cont result)
+(defun c:CCTV-RoomPts (/ pt pts result)
   (setq pts nil)
-  (setq cont T)
-  (princ "\n=== Room Entry Points ===")
-  (princ "\n  Pick room entry points. Press ESC or Enter to finish.")
-  (while cont
-    (setq result (vl-catch-all-apply 'getpoint '("\n  Pick room entry point (Enter to finish): ")))
-    (if (or (vl-catch-all-error-p result) (null result))
-      (setq cont nil)
-      (progn
-        (setq pt result)
-        (setq pts (cons pt pts))
-        (princ (strcat "  Added point: (" (rtos (car pt) 2 0) ","
-                       (rtos (cadr pt) 2 0) ")"))
-      )
-    )
+  (princ "\nRoom Entry Points (Enter/ESC to finish):")
+  (while (setq result (vl-catch-all-apply 'getpoint '("\n  Point: ")))
+    (setq pts (cons result pts))
   )
   (if pts
     (progn
       (setq pts (reverse pts))
       (main-set-room-points pts)
-      (princ (strcat "\n  Total " (itoa (length pts)) " room point(s) set."))
+      (princ (strcat "\n" (itoa (length pts)) " point(s) set."))
     )
-    (princ "\n  No room points set.")
+    (princ "\nNo points set.")
   )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-MLINEArea
-;;;  Select MLINE area for cable tray processing
-;;;  Equivalent to original TextButton14 (mline_set)
-;;;---------------------------------------------------------------
-(defun c:CCTV-MLINEArea ()
-  (princ "\n=== Cable Tray Area Selection ===")
+(defun c:CCTV-MLINEArea (/)
+  (princ "\nCable Tray Area Selection:")
   (main-select-mline-area)
-  (if *main-mline-set*
-    (princ (strcat "\n  Selected " (itoa (sslength *main-mline-set*)) " MLINE(s)."))
-    (princ "\n  No MLINEs selected.")
-  )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-EquivAdd
-;;;  Add equivalent point pair
-;;;  Equivalent to original equivalent point add
-;;;---------------------------------------------------------------
 (defun c:CCTV-EquivAdd (/ pt1 pt2)
-  (princ "\n=== Add Equivalent Point Pair ===")
-  (setq pt1 (getpoint "\n  First point: "))
+  (setq pt1 (getpoint "\nFirst point: "))
   (if pt1
     (progn
-      (setq pt2 (getpoint "\n  Second point: "))
-      (if pt2
-        (progn
-          (equiv-add-pair pt1 pt2)
-          (princ "\n  Equivalent point pair added.")
-          (princ (strcat "\n  Total pairs: " (itoa (equiv-count)))))
-        (princ "\n  Cancelled.")
-      )
+      (setq pt2 (getpoint pt1 "\nSecond point: "))
+      (if pt2 (equiv-add-pair pt1 pt2))
     )
   )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-EquivClear
-;;;  Clear all equivalent point pairs
-;;;---------------------------------------------------------------
-(defun c:CCTV-EquivClear ()
+(defun c:CCTV-EquivClear (/)
   (equiv-clear)
-  (princ "\n  All equivalent point pairs cleared.")
+  (princ "\nAll equivalent points cleared.")
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-LayerProtect
-;;;  Add/remove protected layers (bltc)
-;;;  Layers in bltc stay visible during gbtc
-;;;---------------------------------------------------------------
 (defun c:CCTV-LayerProtect (/ action layer)
-  (princ "\n=== Protected Layer Management ===")
-  (princ (strcat "\n  Current protected layers: "
-                 (if *main-bltc*
-                   (apply 'strcat (mapcar '(lambda (x) (strcat x " ")) *main-bltc*))
-                   "(none)")))
-  (setq action (getstring "\n  [A]dd / [R]emove / [C]ancel: "))
+  (princ "\nProtected Layers:")
+  (princ (strcat "\n  Current: "
+    (if *main-bltc* (apply 'strcat (mapcar '(lambda (x) (strcat x " ")) *main-bltc*)) "(none)")))
+  (setq action (getstring "\n[A]dd / [R]emove: "))
   (cond
-    ((or (= (strcase action) "A") (= (strcase action) "ADD"))
-     (setq layer (getstring "\n  Layer name to protect: "))
-     (if (/= layer "")
-       (progn
-         (main-bltc-add layer)
-         (princ (strcat "\n  Layer '" layer "' added to protected list."))
-       )
-     )
+    ((member (strcase action) '("A" "ADD"))
+     (setq layer (getstring "\nLayer: "))
+     (if (/= layer "") (progn (main-bltc-add layer) (princ (strcat "\nAdded: " layer))))
     )
-    ((or (= (strcase action) "R") (= (strcase action) "REMOVE"))
-     (setq layer (getstring "\n  Layer name to remove: "))
-     (if (/= layer "")
-       (progn
-         (main-bltc-remove layer)
-         (princ (strcat "\n  Layer '" layer "' removed from protected list."))
-       )
-     )
-    )
-    (T
-     (princ "\n  Cancelled.")
+    ((member (strcase action) '("R" "REMOVE"))
+     (setq layer (getstring "\nLayer: "))
+     (if (/= layer "") (progn (main-bltc-remove layer) (princ (strcat "\nRemoved: " layer))))
     )
   )
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-ShowConfig
-;;;  Display current configuration
-;;;---------------------------------------------------------------
-(defun c:CCTV-ShowConfig ()
+(defun c:CCTV-ShowConfig (/)
   (princ "\n\n========================================")
-  (princ "\n  Current CCTV Configuration")
+  (princ "\nCCTV Configuration")
   (princ "\n========================================")
-  (if (null *main-camera-blocks*)
-    (princ "\n  WARNING: No camera blocks configured. Run CCTV-Config first.")
+  (foreach item
+    (list
+      (list "Camera blocks" (if *main-camera-blocks* (strcat (itoa (length *main-camera-blocks*)) " type(s)") "(not set)"))
+      (list "Name layers" (if *main-camera-name-layers* (strcat (itoa (length *main-camera-name-layers*)) " layer(s)") "(not set)"))
+      (list "Junction blocks" (if *main-junction-blocks* (strcat (itoa (length *main-junction-blocks*)) " type(s)") "(not set)"))
+      (list "Cable tray" (or *main-cable-tray-layer* "(not set)"))
+      (list "Pipe layer" (or *main-pipe-layer* "(not set)"))
+      (list "Coefficient" (rtos *main-cable-coefficient* 2 2))
+      (list "Junction bias" (rtos *main-junction-bias* 2 0))
+      (list "Room bias" (rtos *main-room-bias* 2 0))
+      (list "Room points" (itoa (length *main-room-points*)))
+      (list "Equiv pairs" (itoa (equiv-count)))
+    )
+    (princ (strcat "\n  " (car item) ": " (cadr item)))
   )
-  (princ (strcat "\n  Camera blocks: "
-                 (if *main-camera-blocks*
-                   (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-camera-blocks*))
-                   "(not set)")))
-  (princ (strcat "\n  Camera name layers: "
-                 (if *main-camera-name-layers*
-                   (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-camera-name-layers*))
-                   "(not set)")))
-  (princ (strcat "\n  Junction blocks: "
-                 (if *main-junction-blocks*
-                   (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-junction-blocks*))
-                   "(not set)")))
-  (princ (strcat "\n  Cable tray layer: "
-                 (if *main-cable-tray-layer* *main-cable-tray-layer* "(not set)")))
-  (princ (strcat "\n  Pipe layer: "
-                 (if *main-pipe-layer* *main-pipe-layer* "(not set)")))
-  (princ (strcat "\n  Cable coefficient: " (rtos *main-cable-coefficient* 2 2)))
-  (princ (strcat "\n  Junction bias: " (rtos *main-junction-bias* 2 0)))
-  (princ (strcat "\n  Room bias: " (rtos *main-room-bias* 2 0)))
-  (princ (strcat "\n  Room points: " (itoa (length *main-room-points*))))
-  (princ (strcat "\n  Equiv point pairs: " (itoa (equiv-count))))
-  (princ (strcat "\n  MLINE area: "
-                 (if *main-mline-set*
-                   (strcat (itoa (sslength *main-mline-set*)) " MLINE(s)")
-                   "(not set)")))
-  (princ (strcat "\n  Protected layers (bltc): "
-                 (if *main-bltc*
-                   (apply 'strcat (mapcar '(lambda (x) (strcat x ", ")) *main-bltc*))
-                   "(none)")))
   (princ "\n========================================\n")
   (princ)
 )
 
-;;;---------------------------------------------------------------
-;;;  c:CCTV-Help
-;;;  Show help
-;;;---------------------------------------------------------------
-(defun c:CCTV-Help ()
-  (princ "\n\n========================================")
-  (princ "\n  CCTV System - Command Reference")
-  (princ "\n========================================")
+(defun c:CCTV-Help (/)
+  (princ "\n\nCCTV System Commands:")
+  (princ "\n  drawCCTV         - Open configuration form")
+  (princ "\n  CCTV-Config      - Open configuration form")
+  (princ "\n  CCTV-Run         - Run workflow")
+  (princ "\n  CCTV-Save        - Save config to file")
+  (princ "\n  CCTV-Load        - Load config from file")
+  (princ "\n  CCTV-RoomPts     - Set room entry points")
+  (princ "\n  CCTV-MLINEArea   - Select MLINE area")
+  (princ "\n  CCTV-EquivAdd    - Add equivalent point pair")
+  (princ "\n  CCTV-EquivClear  - Clear equivalent points")
+  (princ "\n  CCTV-LayerProtect- Add/remove protected layers")
+  (princ "\n  CCTV-ShowConfig  - Show current config")
+  (princ "\n  CCTV-Help        - This help")
+  (princ "\n  CCTV-Test        - Run all tests")
   (princ "\n")
-  (princ "\n  Workflow Commands:")
-  (princ "\n    CCTV-Config      Configure all parameters")
-  (princ "\n    CCTV-Run         Run the full workflow")
-  (princ "\n    drawCCTV         Run workflow (shortcut)")
-  (princ "\n")
-  (princ "\n  File Commands:")
-  (princ "\n    CCTV-Save        Save configuration to file")
-  (princ "\n    CCTV-Load        Load configuration from file")
-  (princ "\n    CCTV-ShowConfig  Display current configuration")
-  (princ "\n")
-  (princ "\n  Setup Commands:")
-  (princ "\n    CCTV-RoomPts     Set room entry points")
-  (princ "\n    CCTV-MLINEArea   Select cable tray area")
-  (princ "\n    CCTV-LayerProtect Manage protected layers")
-  (princ "\n")
-  (princ "\n  Equivalent Points:")
-  (princ "\n    CCTV-EquivAdd    Add equivalent point pair")
-  (princ "\n    CCTV-EquivClear  Clear all equivalent points")
-  (princ "\n")
-  (princ "\n  Testing:")
-  (princ "\n    test-all         Run all module tests")
-  (princ "\n    test-module      Run specific module test")
-  (princ "\n")
-  (princ "\n========================================\n")
-  (princ)
 )
 
 ;;;===============================================================
 ;;;  Provide module info
 ;;;===============================================================
-(princ "\n[M11] gui_handlers.lsp loaded.")
-(princ "\n  Commands: CCTV-Config, CCTV-Run, CCTV-Save, CCTV-Load,")
+(princ "\n[M11] gui_handlers.lsp loaded (OpenDCL).")
+(princ "\n  Commands: drawCCTV, CCTV-Config, CCTV-Run, CCTV-Save, CCTV-Load,")
 (princ "\n           CCTV-RoomPts, CCTV-MLINEArea, CCTV-LayerProtect,")
 (princ "\n           CCTV-EquivAdd, CCTV-EquivClear, CCTV-ShowConfig,")
-(princ "\n           CCTV-Help, drawCCTV")
-(princ "\n  Usage: Type CCTV-Help for command list")
+(princ "\n           CCTV-Help")
+(princ "\n  Usage: Type drawCCTV to open configuration form")
 (princ)
-
 ;;;===============================================================
 ;;;===============================================================
 ;;;  M12 - Main Module
@@ -7867,15 +8363,6 @@
 )
 
 ;;;---------------------------------------------------------------
-;;;  c:drawCCTV
-;;;  Main command entry
-;;;---------------------------------------------------------------
-(defun c:drawCCTV ()
-  (main-run-workflow)
-  (princ)
-)
-
-;;;---------------------------------------------------------------
 ;;;  main-load-parameters
 ;;;  Load parameters from file
 ;;;---------------------------------------------------------------
@@ -8104,10 +8591,14 @@
 (princ)
 
 ;;;===============================================================
-;;;  All modules loaded
+;;;  All modules loaded - auto-start UI
 ;;;===============================================================
 (princ "\n\n=== CCTV System Loaded ===")
 (princ "\nCommands: CCTV-Config, CCTV-Run, drawCCTV, CCTV-Save, CCTV-Load")
 (princ "\n          CCTV-RoomPts, CCTV-MLINEArea, CCTV-EquivAdd, CCTV-EquivClear")
 (princ "\n          CCTV-LayerProtect, CCTV-ShowConfig, CCTV-Help, CCTV-Test")
 (princ "\n")
+
+;; Auto-start configuration UI
+(c:drawCCTV)
+(princ)
